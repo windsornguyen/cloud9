@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/dedalus-labs/cloud9/discussions
+    about: Ask questions and discuss ideas with the community
+  - name: Security Issue
+    url: https://github.com/dedalus-labs/cloud9/security/advisories/new
+    about: Report a security vulnerability privately

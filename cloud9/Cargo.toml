@@ -1,0 +1,27 @@
+[package]
+name = "cloud9"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+description = "A globally distributed database with provable external consistency"
+
+[[bin]]
+name = "c9"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+cloud9-core = { workspace = true }
+cloud9-storage = { workspace = true }
+cloud9-consensus = { workspace = true }
+cloud9-proto = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+miette = { workspace = true }

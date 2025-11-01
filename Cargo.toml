@@ -1,0 +1,65 @@
+[workspace]
+members = ["cloud9", "cloud9-core", "cloud9-node", "cloud9-proto", "cloud9-storage", "cloud9-consensus"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.91.0"
+license = "MIT"
+authors = ["Windsor Nguyen <oss@dedaluslabs.ai>"]
+repository = "https://github.com/dedalus-labs/cloud9"
+homepage = "https://dedaluslabs.ai"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+unreachable_pub = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(loom)',
+    'cfg(cloud9_unstable)',
+] }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -2 }
+# Allowed pedantic lints
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+# Disallowed restriction lints
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+exit = "warn"
+get_unwrap = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[workspace.dependencies]
+# Internal crates
+cloud9-core = { path = "cloud9-core" }
+cloud9-storage = { path = "cloud9-storage" }
+cloud9-consensus = { path = "cloud9-consensus" }
+cloud9-proto = { path = "cloud9-proto" }
+cloud9-node = { path = "cloud9-node" }
+
+# External dependencies
+anyhow = "1"
+thiserror = "2.0.17"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+axum = "0.8.6"
+clap = { version = "4.5", features = ["derive", "env", "string", "wrap_help"] }
+arcstr = { version = "1.2", features = ["serde"] }
+fs-err = { version = "3", features = ["tokio"] }
+miette = { version = "7.2", features = ["fancy-no-backtrace"] }
+textwrap = "0.16"

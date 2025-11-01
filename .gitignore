@@ -1,0 +1,43 @@
+# Rust build artifacts
+/target
+debug/
+**/*.rs.bk
+*.pdb
+
+# Rustup local state
+.rustup/
+
+# Cargo config overrides
+.cargo/config.toml
+.cargo/config
+
+# Profiling
+flamegraph.svg
+perf.data
+perf.data.old
+*.profdata
+*.profraw
+profile.json
+profile.json.gz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+*.pending-snap
+
+# Documentation
+/site
+
+# LLM tooling
+**/.agent/
+**/.claude/
+**/.mcp.json
