@@ -15,6 +15,22 @@ Indexes aren't separate systems. They're key prefixes that participate in the sa
 
 **Result**: Indexes scale horizontally. Creating an index doesn't lock the table. Queries can use old schema during migration.
 
+## Why This Matters: Zero-Downtime DDL
+
+Traditional databases lock tables during schema changes because schema is global state. Cloud9 versions schemas by timestamp, enabling operational capabilities that other databases can't match:
+
+**1. Rolling upgrades**: Old nodes query at old timestamps (old schema), new nodes query at new timestamps (new schema). Both can coexist in the same cluster, reading the same data with different schema interpretations. This eliminates the upgrade coordination problem that plagues traditional databases.
+
+**2. Zero-downtime DDL**: `ALTER TABLE` writes a new schema version with a commit timestamp—no locks acquired, no data rewritten. Queries started before the DDL commit see the old schema. Queries started after see the new schema. Both execute concurrently against the same underlying MVCC key-value ranges.
+
+**3. Time-travel on schema**: Query data "as of" any timestamp, including historical schemas. `SELECT * FROM users AS OF TIMESTAMP '2024-01-15 10:00:00'` reconstructs not just the data state but the schema state at that moment. This enables reproducible debugging and compliance auditing.
+
+**Why Postgres can't do this**: Postgres has MVCC for table data but treats schema metadata as global state. `ALTER TABLE users ADD COLUMN` acquires an `AccessExclusiveLock` on the table and updates system catalogs (`pg_class`, `pg_attribute`) atomically across all nodes. Even with MVCC protecting concurrent reads of user data, the schema change itself requires a barrier where all nodes observe the same catalog version. This is why Postgres major version upgrades require `pg_upgrade` and downtime.
+
+**Cloud9's advantage**: Schema is versioned metadata replicated via Raft, not a global lock-protected catalog. DDL operations are timestamped writes to the metadata keyspace. Queries pick their schema version based on transaction start timestamp. The same separation that makes lock-free reads possible for data makes lock-free schema evolution possible for DDL.
+
+This is the missing piece that prevents existing databases from supporting true zero-downtime upgrades.
+
 ## Secondary Indexes
 
 ### Index Key Encoding

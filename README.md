@@ -155,6 +155,7 @@ Cloud9 uses HLC to generate monotonic, causally ordered timestamps. Each node tr
 | Single-binary local mode           | ✅      | ❌       | ❌           | ❌          | ❌        | ✅          |
 | Pluggable consensus                | ✅      | ❌       | ❌           | ❌          | ❌        | ❌          |
 | Online schema changes              | ✅      | ✅       | ✅           | ✅          | N/A      | ❌⁵         |
+| Zero-downtime binary upgrades      | ✅      | ✅       | ✅¹⁰         | ❌          | N/A      | ❌          |
 | **AI & Modern Workloads**          |        |         |             |            |          |            |
 | Native vector indexing             | ✅      | ❌       | ❌⁶          | ❌⁶         | ❌        | ✅⁶         |
 | Hybrid dense/sparse search         | ✅      | ❌       | ❌           | ❌          | ❌        | ❌          |
@@ -174,6 +175,7 @@ Cloud9 uses HLC to generate monotonic, causally ordered timestamps. Each node tr
 ⁷ Dataflow/Pub/Sub integration; not built into core storage
 ⁸ Via logical replication; at-least-once semantics
 ⁹ Now under CockroachDB Software License (source-available)
+¹⁰ Added after years of production pain; Cloud9 designs for it from the start
 
 ## Features
 
@@ -212,6 +214,26 @@ Commit latency is approximately quorum RTT + ε. Read-anywhere architecture serv
 ### Lock-Free Read-Only Transactions
 
 Cloud9 supports true lock-free read-only transactions at any timestamp. Read-only transactions never block writes and never acquire locks, enabling high-throughput analytical queries and backups to run concurrently with write traffic. Reads are served directly from any replica that has applied entries up to the requested timestamp, ensuring consistent snapshots without coordination overhead. This makes Cloud9 suitable for mixed workloads where analytical queries, exports, and backups must coexist with latency-sensitive write operations.
+
+### Zero-Downtime Upgrades
+
+Cloud9 is designed for rolling upgrades without downtime—a capability that emerges naturally from its architecture rather than being bolted on after the fact.
+
+**Schema changes are timestamped**: DDL operations create new schema versions at commit timestamps. Old transactions see old schemas, new transactions see new schemas—simultaneously, without locks. This is fundamentally different from traditional databases where schema changes are global, atomic operations that require coordination across all nodes.
+
+**Online index backfills**: Indexes are built in the background using fence timestamps. Reads and writes continue during index creation. The fence timestamp creates a clean boundary: writes before the fence are handled by the backfill process, writes after the fence are automatically indexed. No gaps, no locks, no downtime.
+
+**Per-range rebalancing**: Raft membership changes use joint consensus, allowing replicas to be added or removed without quorum loss. This means you can add new nodes running upgraded binaries, wait for them to catch up, promote them to voters, and remove old nodes—all while serving traffic.
+
+**What this enables**:
+- Add or remove nodes without downtime
+- Upgrade binary versions by rolling replicas one at a time
+- Change schemas while queries run against both old and new versions
+- Rebalance ranges under load without impacting availability
+
+**Why other databases can't do this**: Postgres has MVCC but treats schema as global state—`ALTER TABLE` requires locks that block concurrent access. CockroachDB eventually added zero-downtime upgrades after years of production pain. Spanner has it but is proprietary. Cloud9 designs for it from the start: timestamped schemas, versioned metadata, and Raft-based replication that supports gradual evolution of cluster state.
+
+No other open-source database combines all four capabilities out of the box.
 
 ### Global Sharding and Transparent Scaling
 
@@ -297,3 +319,6 @@ Cloud9 is released under the [MIT License](LICENSE).
 - [Hybrid Logical Clocks](https://cse.buffalo.edu/tech-reports/2014-04.pdf)
 - [Raft Consensus Algorithm](https://raft.github.io/)
 - [FoundationDB: A Distributed Unbundled Transactional Key Value Store](https://www.foundationdb.org/files/fdb-paper.pdf)
+- [Comet: An Active Distributed {Key-Value}
+Store](https://www.usenix.org/legacy/event/osdi10/tech/full_papers/Geambasu.pdf)
+

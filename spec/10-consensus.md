@@ -55,6 +55,56 @@ trait ConsensusDriver {
 
 **Evolution**: If a better consensus algorithm emerges (peer-reviewed, formally verified, widely deployed), the interface provides a migration path. But this is a "someday, maybe" scenario, not a launch requirement.
 
+## Operational Advantage: Zero-Downtime Upgrades
+
+Raft's joint consensus protocol, combined with Cloud9's timestamped schema architecture, enables true zero-downtime upgrades—a capability that emerges naturally from the design rather than being retrofitted.
+
+### The Rolling Upgrade Protocol
+
+**Procedure**:
+1. Add new replica running v2.0 binary as learner (receives log, doesn't vote)
+2. Wait for learner to catch up on Raft log
+3. Promote learner to voter using joint consensus (temporary state where both old and new quorum overlap)
+4. Transfer leaseholder to v2.0 replica (leader can now be v2.0 node)
+5. Remove old v1.0 replica from configuration
+6. Repeat for all ranges in the cluster
+
+**Why this works**:
+
+**Schema changes are timestamped**: Queries don't ask "what version is this node running?" They ask "what was the schema at timestamp T?" Old nodes query at old timestamps (old schema), new nodes query at new timestamps (new schema). Both interpret the same MVCC key-value data correctly because schema interpretation is decoupled from binary version.
+
+**Raft log format includes protocol markers**: Each log entry carries version information. Nodes negotiate compatible protocol during handshake. If v2.0 introduces new log entry types, v1.0 nodes can skip unknown entries (forward compatibility) or v2.0 nodes can write v1.0-compatible entries during the joint consensus phase (backward compatibility).
+
+**Quorum never lost during membership changes**: Joint consensus ensures that no single point in time requires agreement from both old and new majorities. Writes continue flowing because either the old quorum or new quorum can commit—never stuck waiting for both.
+
+**Leaseholder isolation**: Leadership can transfer to v2.0 nodes before v1.0 nodes are removed. The leaseholder (which handles reads) runs the new binary while followers (which only replicate) can still run old binaries. Read path and write path operate on different versions simultaneously.
+
+### Why Postgres Can't Do This
+
+**Postgres treats schema as global state**: `ALTER TABLE users ADD COLUMN` acquires `AccessExclusiveLock` and updates system catalogs (`pg_class`, `pg_attribute`) atomically across all nodes. Even with MVCC for table data, the schema change requires a coordination barrier where all nodes observe the same catalog version. Mixed-version clusters can't agree on schema.
+
+**No protocol versioning in replication**: Postgres streaming replication and logical replication protocols lack version negotiation. If v16 changes the replication message format, v15 followers can't decode it. Upgrades require stopping all nodes, upgrading binaries, and restarting—downtime by necessity.
+
+**Binary format incompatibilities**: Postgres heap tuple format, WAL record structure, and catalog schemas change between major versions. Mixed-version clusters would corrupt data. `pg_upgrade` exists specifically because in-place rolling upgrades are architecturally impossible.
+
+### Cloud9's Architectural Advantages
+
+**1. Schema is Raft-replicated metadata, not global locks**: DDL operations write new schema versions to the metadata keyspace with commit timestamps. Queries pick schema at transaction start time. No coordination needed—schema evolution is just another replicated write.
+
+**2. Protocol versioning from day one**: RPC messages include version headers. Nodes handshake to negotiate compatible protocol. Raft log entries carry format versions. Mixed-version clusters are supported by design, not retrofitted.
+
+**3. MVCC extends to schema**: The same mechanism that enables lock-free reads on data enables lock-free schema evolution. Transactions see (data@timestamp, schema@timestamp) pairs. Upgrading binaries doesn't change data layout—only schema interpretation.
+
+**4. Per-range independence**: Each range can upgrade independently. No cluster-wide "flip the switch" moment. If a range upgrade fails, it doesn't cascade to other ranges. Fault isolation by design.
+
+### Production Reality
+
+CockroachDB added zero-downtime upgrades after years of production pain (v20.x+, ~2020). Early versions required careful orchestration and failed frequently. Spanner has this capability but is proprietary—can't verify implementation.
+
+Cloud9 designs for it from the start: timestamped schemas, versioned protocols, Raft-based replication that supports gradual state evolution. The architecture assumes mixed-version operation is normal, not exceptional.
+
+This is why Cloud9 can claim "one-click zero-downtime upgrades" as a day-one feature—the primitives are already present in the core design.
+
 ## Operational Features: Within Raft
 
 The consensus driver interface enables operational flexibility without algorithmic complexity. These features live within Raft's existing framework:
