@@ -1,0 +1,69 @@
+# Spell checker configuration for typos-cli
+# https://github.com/crate-ci/typos
+#
+# Run: typos .
+# Fix: typos . --write-changes
+
+[files]
+extend-exclude = [
+  # Dependencies
+  "Cargo.lock",
+  "target/",
+
+  # Build artifacts
+  "*.profraw",
+
+  # Test fixtures
+  "testdata/",
+
+  # Do not self-check
+  "typos.toml",
+]
+
+[default]
+extend-ignore-re = [
+  # Ignore base64/hex encoded strings
+  "\"[A-Za-z0-9+/=]{20,}\"",
+  "0x[A-Fa-f0-9]{8,}",
+]
+
+[default.extend-words]
+# Rust conventions
+cfg = "cfg"
+ser = "ser"     # serde
+deser = "deser" # deserialize
+vec = "vec"
+mut = "mut"
+impl = "impl"
+recv = "recv"   # receive
+alloc = "alloc"
+
+# Crypto/blockchain terminology
+ecdsa = "ecdsa"
+schnorr = "schnorr"
+keccak = "keccak"
+merkle = "merkle"
+trie = "trie"
+nonce = "nonce"
+pubkey = "pubkey"
+privkey = "privkey"
+sig = "sig"
+tx = "tx"       # transaction
+txs = "txs"
+utxo = "utxo"
+rlp = "rlp"
+
+# Consensus terminology
+bft = "bft"
+pbft = "pbft"
+poa = "poa"
+pos = "pos"
+
+[type.rust]
+extend-glob = ["*.rs"]
+
+[type.markdown]
+extend-glob = ["*.md"]
+
+[type.toml]
+extend-glob = ["*.toml"]
