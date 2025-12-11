@@ -37,6 +37,10 @@ Thumbs.db
 # Documentation
 /site
 
+# Node (commitlint)
+node_modules/
+package-lock.json
+
 # LLM tooling
 **/.agent/
 **/.claude/
