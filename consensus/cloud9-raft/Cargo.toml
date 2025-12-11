@@ -1,5 +1,5 @@
 [package]
-name = "cloud9-consensus"
+name = "cloud9-raft"
 version = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
@@ -15,3 +15,7 @@ workspace = true
 cloud9-core = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+proptest-state-machine = { workspace = true }

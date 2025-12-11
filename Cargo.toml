@@ -1,5 +1,5 @@
 [workspace]
-members = ["cloud9", "cloud9-core", "cloud9-node", "cloud9-proto", "cloud9-storage", "cloud9-consensus"]
+members = ["cloud9", "cloud9-core", "cloud9-node", "cloud9-proto", "cloud9-storage", "consensus/cloud9-raft", "consensus/cloud9-raft-io"]
 resolver = "2"
 
 [workspace.package]
@@ -45,7 +45,8 @@ unimplemented = "warn"
 # Internal crates
 cloud9-core = { path = "cloud9-core" }
 cloud9-storage = { path = "cloud9-storage" }
-cloud9-consensus = { path = "cloud9-consensus" }
+cloud9-raft = { path = "consensus/cloud9-raft" }
+cloud9-raft-io = { path = "consensus/cloud9-raft-io" }
 cloud9-proto = { path = "cloud9-proto" }
 cloud9-node = { path = "cloud9-node" }
 
@@ -63,3 +64,13 @@ arcstr = { version = "1.2", features = ["serde"] }
 fs-err = { version = "3", features = ["tokio"] }
 miette = { version = "7.2", features = ["fancy-no-backtrace"] }
 textwrap = "0.16"
+
+# Testing - concurrency
+loom = "0.7.2"
+
+# Testing - property-based & state machine
+proptest = "1.5"
+proptest-state-machine = "0.6"
+
+# Testing - concurrency (randomized)
+shuttle = "0.8"
