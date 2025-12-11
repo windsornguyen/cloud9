@@ -1,0 +1,28 @@
+name: Typos
+
+on:
+  pull_request:
+    paths:
+      - "**.rs"
+      - "**.md"
+      - "**.toml"
+      - "typos.toml"
+  push:
+    branches: [main]
+    paths:
+      - "**.rs"
+      - "**.md"
+      - "**.toml"
+      - "typos.toml"
+
+jobs:
+  typos:
+    name: Spell Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check spelling
+        uses: crate-ci/typos@v1
+        with:
+          config: typos.toml

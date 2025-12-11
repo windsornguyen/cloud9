@@ -1,0 +1,120 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticCommitTypeAll(chore)",
+    "group:allNonMajor"
+  ],
+  "baseBranches": ["main"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "America/Los_Angeles",
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 5,
+  "prCreation": "not-pending",
+  "rebaseWhen": "conflicted",
+  "semanticCommits": "enabled",
+  "commitMessagePrefix": "chore(deps):",
+  "labels": ["dependencies", "automated"],
+  "automerge": false,
+  "platformAutomerge": false,
+  "rangeStrategy": "bump",
+  "cargo": {
+    "enabled": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Rust crates",
+      "matchManagers": ["cargo"],
+      "groupName": "rust dependencies"
+    },
+    {
+      "description": "Rust dev tools",
+      "matchPackagePatterns": ["^criterion", "^proptest", "^quickcheck"],
+      "groupName": "rust dev tools",
+      "automerge": true
+    },
+    {
+      "description": "Security-sensitive crates - require manual review",
+      "matchPackagePatterns": [
+        "^ring",
+        "^rustls",
+        "^openssl",
+        "^crypto",
+        "^ed25519",
+        "^secp256k1",
+        "^k256",
+        "^p256",
+        "^sha2",
+        "^sha3",
+        "^aes",
+        "^chacha"
+      ],
+      "groupName": "security crates",
+      "automerge": false,
+      "labels": ["dependencies", "security"]
+    },
+    {
+      "description": "Serialization",
+      "matchManagers": ["cargo"],
+      "matchPackagePatterns": ["^serde", "^bincode", "^postcard"],
+      "groupName": "serialization"
+    },
+    {
+      "description": "Async runtime",
+      "matchManagers": ["cargo"],
+      "matchPackagePatterns": ["^tokio", "^async-", "^futures"],
+      "groupName": "async"
+    },
+    {
+      "description": "Networking",
+      "matchManagers": ["cargo"],
+      "matchPackagePatterns": ["^libp2p", "^quinn", "^rustls", "^webrtc"],
+      "groupName": "networking"
+    },
+    {
+      "description": "Database/Storage",
+      "matchManagers": ["cargo"],
+      "matchPackagePatterns": ["^rocksdb", "^sled", "^redb", "^sqlite"],
+      "groupName": "storage"
+    },
+    {
+      "description": "Testing utilities",
+      "matchManagers": ["cargo"],
+      "matchPackagePatterns": ["^proptest", "^quickcheck", "^criterion", "^test-"],
+      "groupName": "testing"
+    },
+    {
+      "description": "Minor/patch automerge for stable versions",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "matchCurrentVersion": "!/^0/"
+    },
+    {
+      "description": "Pin major versions (manual review)",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "breaking"]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security", "dependencies"]
+  },
+  "ignorePaths": ["**/testdata/**", "**/target/**"]
+}
