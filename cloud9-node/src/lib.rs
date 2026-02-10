@@ -1,6 +1,6 @@
 //! Top-level orchestration for Cloud9 nodes.
 
-use cloud9_consensus::ConsensusConfig;
+use cloud9_raft::ConsensusConfig;
 use cloud9_storage::StorageOptions;
 use tracing::{info, instrument};
 
