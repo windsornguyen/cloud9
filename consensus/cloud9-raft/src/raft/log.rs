@@ -61,6 +61,8 @@ pub struct Log {
     /// Term of the last entry included in the snapshot.
     /// Corresponds to `lastIncludedTerm` in Figure 5.3.
     snapshot_term: Term,
+    /// Latest configuration as of `snapshot_index`.
+    snapshot_config: Option<Configuration>,
 }
 
 impl Log {
@@ -100,12 +102,15 @@ impl Log {
 
     /// Term at a given index, or 0 if index is 0 or entry is not available.
     ///
-    /// Returns 0 for indices that have been discarded by snapshotting.
+    /// Returns `snapshot_term` for `snapshot_index`, since leaders use that
+    /// entry as the consistency boundary after compaction.
     /// Callers should check `snapshot_index()` to distinguish missing vs discarded.
     #[inline]
     pub fn term_at(&self, index: LogIndex) -> Term {
-        if index == 0 || index <= self.snapshot_index {
+        if index == 0 || index < self.snapshot_index {
             0
+        } else if index == self.snapshot_index {
+            self.snapshot_term
         } else {
             self.to_vec_index(index).and_then(|i| self.entries.get(i)).map_or(0, |e| e.term)
         }
@@ -149,6 +154,7 @@ impl Log {
         if index <= self.snapshot_index {
             return; // Already discarded
         }
+        let snapshot_config = self.config_at(index).cloned();
 
         // Remove entries up to and including index
         let entries_to_remove =
@@ -161,17 +167,28 @@ impl Log {
 
         self.snapshot_index = index;
         self.snapshot_term = term;
+        self.snapshot_config = snapshot_config;
     }
 
     /// Install snapshot metadata (for followers receiving `InstallSnapshot`).
     ///
-    /// Discards all entries and sets snapshot metadata.
-    pub fn install_snapshot(&mut self, index: LogIndex, term: Term) {
-        self.entries.clear();
-        self.snapshot_index = index;
-        self.snapshot_term = term;
+    /// Retains entries after the snapshot if the snapshot describes a prefix
+    /// of this log; otherwise discards the suffix as superseded.
+    pub fn install_snapshot(&mut self, index: LogIndex, term: Term, config: Configuration) {
+        if index > self.snapshot_index && self.term_at(index) == term {
+            self.truncate_prefix(index, term);
+        } else {
+            self.entries.clear();
+            self.snapshot_index = index;
+            self.snapshot_term = term;
+        }
+        self.snapshot_config = Some(config);
     }
 
+    /// Whether installing this snapshot would retain log entries after it.
+    pub fn snapshot_matches_prefix(&self, index: LogIndex, term: Term) -> bool {
+        index > self.snapshot_index && self.term_at(index) == term
+    }
     // --- Slicing ---
 
     /// Get a slice of entries from `start` to `end` inclusive.
@@ -210,16 +227,20 @@ impl Log {
 
     /// Find the latest configuration entry at or before the given index.
     ///
-    /// Only searches available entries (after `snapshot_index`).
-    /// Returns None if no config entry exists in available range.
+    /// Searches available entries plus the snapshot configuration.
+    /// Returns None if no config entry exists before or at `index`.
     pub fn config_at(&self, index: LogIndex) -> Option<&Configuration> {
         if index <= self.snapshot_index {
-            return None;
+            return self.snapshot_config.as_ref();
         }
         let end_vec_idx = self
             .to_vec_index(index)
             .map_or(self.entries.len(), |i| (i + 1).min(self.entries.len()));
-        self.entries[..end_vec_idx].iter().rev().find_map(|e| e.payload.as_config())
+        self.entries[..end_vec_idx]
+            .iter()
+            .rev()
+            .find_map(|e| e.payload.as_config())
+            .or(self.snapshot_config.as_ref())
     }
 
     /// Find the index of the latest uncommitted configuration entry.
@@ -450,7 +471,8 @@ mod tests {
         assert_eq!(log.term_at(0), 0);
         // Discarded entries return 0 (caller should check snapshot_index)
         assert_eq!(log.term_at(1), 0);
-        assert_eq!(log.term_at(2), 0);
+        // Snapshot boundary keeps the term needed for AppendEntries matching
+        assert_eq!(log.term_at(2), 2);
         // Remaining entries work
         assert_eq!(log.term_at(3), 3);
         assert_eq!(log.term_at(5), 5);
@@ -519,5 +541,50 @@ mod tests {
 
         // No entries remain, first_index returns snapshot_index + 1
         assert_eq!(log.first_index(), 4);
+    }
+
+    #[test]
+    fn truncate_prefix_preserves_snapshot_configuration() {
+        let mut log = Log::default();
+        let config = Configuration::simple(vec![NodeId(0), NodeId(1)]);
+        log.append(entry(1, 1));
+        log.append(Entry { term: 1, index: 2, payload: EntryPayload::Config(config.clone()) });
+        log.append(entry(1, 3));
+
+        log.truncate_prefix(2, 1);
+
+        assert_eq!(log.config_at(2), Some(&config));
+        assert_eq!(log.config_at(3), Some(&config));
+    }
+
+    #[test]
+    fn install_snapshot_retains_matching_suffix() {
+        let mut log = Log::default();
+        for i in 1..=5 {
+            log.append(entry(1, i));
+        }
+
+        log.install_snapshot(3, 1, Configuration::simple(vec![NodeId(0)]));
+
+        assert_eq!(log.snapshot_index(), 3);
+        assert_eq!(log.last_index(), 5);
+        assert_eq!(log.term_at(3), 1);
+        assert!(log.get(4).is_some());
+        assert!(log.get(5).is_some());
+    }
+
+    #[test]
+    fn install_snapshot_discards_conflicting_suffix() {
+        let mut log = Log::default();
+        for i in 1..=5 {
+            log.append(entry(1, i));
+        }
+
+        log.install_snapshot(3, 2, Configuration::simple(vec![NodeId(0)]));
+
+        assert_eq!(log.snapshot_index(), 3);
+        assert_eq!(log.snapshot_term(), 2);
+        assert_eq!(log.last_index(), 3);
+        assert!(log.is_empty());
     }
 }

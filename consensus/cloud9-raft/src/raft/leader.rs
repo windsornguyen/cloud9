@@ -17,8 +17,8 @@ use crate::{Command, LogIndex, NodeId, TransferError};
 use super::StepResult;
 use super::core::Core;
 use super::event::{
-    AppendRequest, AppendResponse, Effects, Event, Message, Payload, PreVoteResponse, SendSnapshot,
-    VoteResponse,
+    AppendRequest, AppendResponse, Effects, Event, InstallSnapshotResponse, Message, Payload,
+    PreVoteResponse, SendSnapshot, VoteResponse,
 };
 use super::log::{Entry, EntryPayload};
 use super::membership::{ConfigChange, ConfigChangeError};
@@ -301,6 +301,9 @@ impl Leader {
                     Payload::AppendResponse(resp) => {
                         self.handle_append_response(core, msg.from, resp)
                     }
+                    Payload::InstallSnapshotResponse(resp) => {
+                        self.handle_install_snapshot_response(core, msg.from, resp)
+                    }
                     Payload::VoteRequest(_) => Self::handle_vote_request(core, msg.from),
                     _ => StepResult::none(),
                 }
@@ -381,6 +384,31 @@ impl Leader {
             self.next_index.insert(from, new_next);
             StepResult::stay(self.send_append_to(core, from))
         }
+    }
+
+    fn handle_install_snapshot_response(
+        &mut self,
+        core: &mut Core,
+        from: NodeId,
+        resp: InstallSnapshotResponse,
+    ) -> StepResult {
+        if !resp.success || !core.effective_config().is_member(from) {
+            return StepResult::none();
+        }
+
+        let current_match = self.match_index.get(&from).copied().unwrap_or(0);
+        if resp.last_included_index <= current_match {
+            return StepResult::none();
+        }
+
+        self.match_index.insert(from, resp.last_included_index);
+        self.next_index.insert(from, resp.last_included_index + 1);
+
+        let (effects, should_step_down) = self.maybe_commit(core);
+        if should_step_down {
+            return StepResult::to_follower(None, effects);
+        }
+        StepResult::stay(effects)
     }
 
     fn handle_vote_request(core: &Core, from: NodeId) -> StepResult {
@@ -609,6 +637,7 @@ impl Leader {
                 to,
                 last_included_index: snapshot_index,
                 last_included_term: core.log().snapshot_term(),
+                configuration: core.config_at(snapshot_index),
             });
         }
 
@@ -655,6 +684,7 @@ mod tests {
     use super::super::core::Config;
     use super::super::event::VoteRequest;
     use super::super::log::EntryPayload;
+    use super::super::membership::Configuration;
 
     fn test_setup() -> (Core, Leader, Effects) {
         let config = Config::new(NodeId(0))
@@ -882,11 +912,15 @@ mod tests {
         let effects = leader.send_append_to(&core, NodeId(1));
 
         // Should emit SendSnapshot effect instead of AppendRequest
-        assert!(effects.send_snapshot.is_some());
-        let snap = effects.send_snapshot.unwrap();
+        assert_eq!(effects.send_snapshots.len(), 1);
+        let snap = &effects.send_snapshots[0];
         assert_eq!(snap.to, NodeId(1));
         assert_eq!(snap.last_included_index, 3);
         assert_eq!(snap.last_included_term, 1);
+        assert_eq!(
+            snap.configuration,
+            Configuration::simple(vec![NodeId(0), NodeId(1), NodeId(2)])
+        );
 
         // Should NOT emit AppendRequest message
         assert!(effects.messages.is_empty());
@@ -912,7 +946,7 @@ mod tests {
         let effects = leader.send_append_to(&core, NodeId(1));
 
         // Should emit AppendRequest, not snapshot
-        assert!(effects.send_snapshot.is_none());
+        assert!(effects.send_snapshots.is_empty());
         assert_eq!(effects.messages.len(), 1);
 
         if let Payload::AppendRequest(req) = &effects.messages[0].payload {
@@ -922,6 +956,51 @@ mod tests {
         } else {
             panic!("expected AppendRequest");
         }
+    }
+
+    #[test]
+    fn install_snapshot_response_advances_follower_progress() {
+        let (mut core, mut leader, _) = test_setup();
+        leader.next_index.insert(NodeId(1), 1);
+        leader.match_index.insert(NodeId(1), 0);
+
+        let msg = Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 1,
+            payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse {
+                success: true,
+                last_included_index: 3,
+            }),
+        };
+
+        let StepResult { transition, .. } = leader.step(&mut core, Event::Message(msg));
+
+        assert!(matches!(transition, Transition::Stay));
+        assert_eq!(leader.match_index.get(&NodeId(1)), Some(&3));
+        assert_eq!(leader.next_index.get(&NodeId(1)), Some(&4));
+    }
+
+    #[test]
+    fn stale_install_snapshot_response_does_not_regress_progress() {
+        let (mut core, mut leader, _) = test_setup();
+        leader.next_index.insert(NodeId(1), 11);
+        leader.match_index.insert(NodeId(1), 10);
+
+        let msg = Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 1,
+            payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse {
+                success: true,
+                last_included_index: 3,
+            }),
+        };
+
+        leader.step(&mut core, Event::Message(msg));
+
+        assert_eq!(leader.match_index.get(&NodeId(1)), Some(&10));
+        assert_eq!(leader.next_index.get(&NodeId(1)), Some(&11));
     }
 
     // --- Read index tests (§6.4) ---

@@ -290,9 +290,14 @@ impl Core {
     /// This is the latest configuration from the log, or the bootstrap config
     /// if no config entries exist. Per §4, config takes effect when appended.
     pub fn effective_config(&self) -> Configuration {
+        self.config_at(self.persistent.log.last_index())
+    }
+
+    /// Get the effective configuration at a specific log index.
+    pub fn config_at(&self, index: LogIndex) -> Configuration {
         self.persistent
             .log
-            .config_at(self.persistent.log.last_index())
+            .config_at(index)
             .cloned()
             .unwrap_or_else(|| self.persistent.bootstrap_config.clone())
     }
