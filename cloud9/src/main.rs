@@ -1,8 +1,14 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use cloud9_core::{fs, install_diagnostics};
+use cloud9_core::{SharedString, fs, install_diagnostics};
+use cloud9_node::{NodeConfig, raft_config};
+use cloud9_raft::NodeId;
+use cloud9_storage::StorageOptions;
 use miette::{Context, IntoDiagnostic, Result};
+use serde::Deserialize;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -38,35 +44,30 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     install_diagnostics()?;
 
     let cli = Cli::parse();
     init_tracing(cli.verbose, !cli.no_color)?;
+    if cli.no_progress {
+        tracing::debug!("progress disabled for this run");
+    }
 
     match cli.command {
         Command::Start { config } => {
             let config_path = config.unwrap_or_else(|| PathBuf::from("cloud9.toml"));
-            let maybe_config = load_config(&config_path)?;
+            let config = load_node_config(&config_path)?;
             tracing::info!(path = %config_path.display(), "booting node");
-            if let Some(config) = maybe_config {
-                tracing::debug!(contents = %config, "loaded configuration");
-            } else {
+            if !config_path.exists() {
                 tracing::warn!(path = %config_path.display(), "using defaults; config missing");
             }
+            cloud9_node::launch(config).await.map_err(|error| miette::miette!("{error:#}"))?;
         }
         Command::CheckConfig { config } => {
-            load_config(&config)
-                .and_then(|contents| {
-                    contents.ok_or_else(|| miette::miette!("config `{}` missing", config.display()))
-                })
-                .context("configuration check failed")?;
+            load_required_node_config(&config).context("configuration check failed")?;
             tracing::info!(path = %config.display(), "configuration OK");
         }
-    }
-
-    if cli.no_progress {
-        tracing::debug!("progress disabled for this run");
     }
 
     Ok(())
@@ -89,7 +90,50 @@ fn init_tracing(verbosity: u8, color_enabled: bool) -> Result<()> {
     tracing_subscriber::registry().with(filter).with(fmt_layer).try_init().into_diagnostic()
 }
 
-fn load_config(path: &PathBuf) -> Result<Option<String>> {
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    node: NodeSection,
+    storage: StorageSection,
+    cluster: ClusterSection,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeSection {
+    id: u64,
+    #[serde(rename = "host")]
+    _host: String,
+    client_port: u16,
+    raft_port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageSection {
+    data_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClusterSection {
+    peers: Vec<PeerSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerSection {
+    id: u64,
+    host: String,
+    raft_port: u16,
+}
+
+fn load_node_config(path: &Path) -> Result<NodeConfig> {
+    if path.exists() { load_required_node_config(path) } else { Ok(NodeConfig::default()) }
+}
+
+fn load_required_node_config(path: &Path) -> Result<NodeConfig> {
+    let contents =
+        load_config(path)?.ok_or_else(|| miette::miette!("config `{}` missing", path.display()))?;
+    parse_node_config(&contents).with_context(|| format!("parsing `{}`", path.display()))
+}
+
+fn load_config(path: &Path) -> Result<Option<String>> {
     if path.exists() {
         fs::read_to_string(path)
             .into_diagnostic()
@@ -97,5 +141,55 @@ fn load_config(path: &PathBuf) -> Result<Option<String>> {
             .with_context(|| format!("reading configuration from `{}`", path.display()))
     } else {
         Ok(None)
+    }
+}
+
+fn parse_node_config(contents: &str) -> Result<NodeConfig> {
+    let config: ConfigFile = toml::from_str(contents).into_diagnostic()?;
+    let node_id = NodeId(config.node.id);
+    let client_addr = bind_addr(config.node.client_port);
+    let raft_addr = bind_addr(config.node.raft_port);
+    let peers = peer_addrs(&config.cluster.peers)?;
+    if !peers.contains_key(&node_id) {
+        return Err(miette::miette!("cluster.peers must include node.id {}", node_id.0));
+    }
+
+    Ok(NodeConfig {
+        node_id,
+        client_addr,
+        raft_addr,
+        peers,
+        storage: StorageOptions {
+            name: SharedString::from("default"),
+            data_dir: SharedString::from(config.storage.data_dir),
+        },
+        consensus: raft_config(node_id),
+    })
+}
+
+fn bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
+}
+
+fn peer_addrs(peers: &[PeerSection]) -> Result<BTreeMap<NodeId, SocketAddr>> {
+    peers
+        .iter()
+        .map(|peer| Ok((NodeId(peer.id), resolve_peer_addr(&peer.host, peer.raft_port)?)))
+        .collect()
+}
+
+fn resolve_peer_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .into_diagnostic()
+        .with_context(|| format!("resolving peer address `{host}:{port}`"))?
+        .collect::<Vec<_>>();
+    match addrs.as_slice() {
+        [addr] => Ok(*addr),
+        [] => Err(miette::miette!("peer address `{host}:{port}` resolved to no addresses")),
+        _ => Err(miette::miette!(
+            "peer address `{host}:{port}` resolved ambiguously to {} addresses",
+            addrs.len()
+        )),
     }
 }
