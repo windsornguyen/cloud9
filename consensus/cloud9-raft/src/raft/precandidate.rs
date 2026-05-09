@@ -45,13 +45,16 @@ impl PreCandidate {
             last_contact_tick: core.ticks.saturating_sub(core.config.election_timeout.0),
         };
 
-        // Pre-vote for self
-        precandidate.pre_votes.insert(core.id());
+        // A server outside its latest configuration may run pre-vote, but it
+        // does not own a vote in that configuration.
+        if core.is_voter() {
+            precandidate.pre_votes.insert(core.id());
+        }
 
         let config = core.effective_config();
 
         // Single-node cluster: immediate win
-        if config.voter_count() == 1 {
+        if config.voter_count() == 1 && config.is_voter(core.id()) {
             return (precandidate, Effects::none());
         }
 
@@ -155,6 +158,9 @@ impl PreCandidate {
             core.maybe_update_term(resp.term);
             return StepResult::to_follower(None, Effects::none().with_persist());
         }
+        if resp.term < core.term() {
+            return StepResult::none();
+        }
 
         if !resp.granted {
             return StepResult::none();
@@ -179,7 +185,7 @@ impl PreCandidate {
     ) -> StepResult {
         // Leader exists: step down
         self.last_contact_tick = core.ticks;
-        StepResult::to_follower(Some(from), Effects::none())
+        StepResult::to_follower_after_contact(Some(from), Effects::none())
     }
 
     fn handle_prevote_request(
@@ -192,8 +198,9 @@ impl PreCandidate {
         // 1. Candidate's next_term is at least our term + 1
         // 2. Candidate's log is at least as up-to-date as ours
         let dominated = core.log_is_up_to_date(req.last_log_term, req.last_log_index);
+        let candidate_is_voter = core.effective_config().is_voter(from);
         let term_ok = req.next_term > core.term();
-        let granted = term_ok && dominated;
+        let granted = candidate_is_voter && term_ok && dominated;
 
         let resp = Message {
             from: core.id(),
@@ -266,6 +273,17 @@ mod tests {
     }
 
     #[test]
+    fn non_voter_precandidate_does_not_prevote_for_self() {
+        let config = Config::new(NodeId(0)).with_election_timeout(10, 20);
+        let mut core = Core::new(config, &[NodeId(1), NodeId(2)]);
+        let (precandidate, effects) = PreCandidate::new(&mut core);
+
+        assert!(!precandidate.pre_votes.contains(&NodeId(0)));
+        assert!(!precandidate.has_quorum(&core));
+        assert_eq!(effects.messages.len(), 2);
+    }
+
+    #[test]
     fn new_precandidate_sends_prevote_requests() {
         let (core, _, effects) = test_setup();
         assert_eq!(effects.messages.len(), 2); // To peers 1 and 2
@@ -305,6 +323,23 @@ mod tests {
 
         let StepResult { transition, .. } = precandidate.step(&mut core, Event::Message(msg));
         assert!(matches!(transition, Transition::ToCandidate));
+    }
+
+    #[test]
+    fn ignores_stale_prevote_response() {
+        let (mut core, mut precandidate, _) = test_setup();
+        core.persistent.term = 5;
+
+        let msg = Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 4,
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: 4, granted: true }),
+        };
+
+        let StepResult { transition, .. } = precandidate.step(&mut core, Event::Message(msg));
+        assert!(matches!(transition, Transition::Stay));
+        assert_eq!(precandidate.pre_votes.len(), 1);
     }
 
     #[test]
@@ -356,7 +391,7 @@ mod tests {
         };
 
         let StepResult { transition, .. } = precandidate.step(&mut core, Event::Message(msg));
-        assert!(matches!(transition, Transition::ToFollower(Some(NodeId(1)))));
+        assert!(matches!(transition, Transition::ToFollowerAfterContact(Some(NodeId(1)))));
     }
 
     #[test]

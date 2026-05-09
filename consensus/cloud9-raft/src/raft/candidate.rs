@@ -46,13 +46,16 @@ impl Candidate {
             last_contact_tick: core.ticks.saturating_sub(core.config.election_timeout.0),
         };
 
-        // Vote for self
-        candidate.votes.insert(core.id());
+        // A server outside its latest configuration may campaign, but it
+        // does not own a vote in that configuration.
+        if core.is_voter() {
+            candidate.votes.insert(core.id());
+        }
 
         let config = core.effective_config();
 
         // Single-node cluster: immediate win
-        if config.voter_count() == 1 {
+        if config.voter_count() == 1 && config.is_voter(core.id()) {
             return (candidate, Effects::none().with_persist());
         }
 
@@ -115,19 +118,7 @@ impl Candidate {
                     core.maybe_update_term(msg.term);
                     let leader =
                         matches!(msg.payload, Payload::AppendRequest(_)).then_some(msg.from);
-                    let mut effects = Effects::none().with_persist();
-                    if matches!(msg.payload, Payload::AppendRequest(_)) {
-                        effects = effects.with_message(Message {
-                            from: core.id(),
-                            to: msg.from,
-                            term: core.term(),
-                            payload: Payload::AppendResponse(AppendResponse {
-                                success: true,
-                                last_log_index: core.log().last_index(),
-                            }),
-                        });
-                    }
-                    return StepResult::to_follower(leader, effects);
+                    return StepResult::to_follower(leader, Effects::none().with_persist());
                 }
 
                 // Stale term: reject
@@ -194,7 +185,7 @@ impl Candidate {
         // Another leader exists for this term: step down
         // (This shouldn't happen if election safety holds, but handle gracefully)
         self.last_contact_tick = core.ticks;
-        StepResult::to_follower(Some(from), Effects::none())
+        StepResult::to_follower_after_contact(Some(from), Effects::none())
     }
 
     fn handle_vote_request(core: &Core, from: NodeId) -> StepResult {
@@ -238,8 +229,9 @@ impl Candidate {
         // As a candidate, we've already voted for ourselves and incremented term.
         // Grant pre-vote only if their next_term is higher than ours and log is up-to-date.
         let dominated = core.log_is_up_to_date(req.last_log_term, req.last_log_index);
+        let candidate_is_voter = core.effective_config().is_voter(from);
         let term_ok = req.next_term > core.term();
-        let granted = term_ok && dominated;
+        let granted = candidate_is_voter && term_ok && dominated;
 
         Effects::none().with_message(Message {
             from: core.id(),
@@ -273,6 +265,8 @@ mod tests {
 
     use super::super::Transition;
     use super::super::core::Config;
+    use super::super::log::{Entry, EntryPayload};
+    use crate::Command;
 
     fn test_setup() -> (Core, Candidate, Effects) {
         let config = Config::new(NodeId(0)).with_prevote(false);
@@ -292,6 +286,18 @@ mod tests {
         let (core, candidate, _) = test_setup();
         assert_eq!(core.persistent.voted_for, Some(NodeId(0)));
         assert_eq!(candidate.votes.len(), 1);
+    }
+
+    #[test]
+    fn non_voter_candidate_does_not_vote_for_self() {
+        let config = Config::new(NodeId(0));
+        let mut core = Core::new(config, &[NodeId(1), NodeId(2)]);
+        let (candidate, effects) = Candidate::new(&mut core);
+
+        assert_eq!(core.persistent.voted_for, None);
+        assert!(!candidate.votes.contains(&NodeId(0)));
+        assert!(!candidate.has_quorum(&core));
+        assert_eq!(effects.messages.len(), 2);
     }
 
     #[test]
@@ -366,6 +372,33 @@ mod tests {
     }
 
     #[test]
+    fn higher_term_append_does_not_ack_without_consistency_check() {
+        let (mut core, mut candidate, _) = test_setup();
+        core.log_mut().append(Entry {
+            term: 1,
+            index: 1,
+            payload: EntryPayload::Command(Command(vec![1])),
+        });
+
+        let msg = Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 2,
+            payload: Payload::AppendRequest(AppendRequest {
+                prev_log_index: 1,
+                prev_log_term: 2,
+                entries: vec![],
+                leader_commit: 0,
+            }),
+        };
+
+        let StepResult { transition, effects } = candidate.step(&mut core, Event::Message(msg));
+        assert!(matches!(transition, Transition::ToFollower(Some(NodeId(1)))));
+        assert!(effects.persist);
+        assert!(effects.messages.is_empty());
+    }
+
+    #[test]
     fn steps_down_on_append_from_leader() {
         let (mut core, mut candidate, _) = test_setup();
 
@@ -382,7 +415,7 @@ mod tests {
         };
 
         let StepResult { transition, .. } = candidate.step(&mut core, Event::Message(msg));
-        assert!(matches!(transition, Transition::ToFollower(Some(NodeId(1)))));
+        assert!(matches!(transition, Transition::ToFollowerAfterContact(Some(NodeId(1)))));
     }
 
     #[test]

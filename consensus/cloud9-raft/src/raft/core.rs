@@ -239,8 +239,9 @@ impl Core {
 
     /// Increment term and vote for self. Used when becoming candidate.
     pub fn start_election(&mut self) {
+        let can_vote_for_self = self.is_voter();
         self.persistent.term += 1;
-        self.persistent.voted_for = Some(self.config.id);
+        self.persistent.voted_for = can_vote_for_self.then_some(self.config.id);
     }
 
     /// Record a vote for a candidate.
