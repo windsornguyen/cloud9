@@ -1,4 +1,5 @@
 //! Performance optimization tests (§10.2).
+#![allow(clippy::expect_used, clippy::print_stderr, clippy::unwrap_used)]
 //!
 //! Tests correctness and demonstrates performance benefits of:
 //! - Parallel disk write (§10.2.1): Leader writes disk while replicating
@@ -8,9 +9,7 @@
 
 use std::collections::HashMap;
 
-use cloud9_raft::raft::{
-    AppendResponse, Config, Message, Payload, RaftNode,
-};
+use cloud9_raft::raft::{AppendResponse, Config, Message, Payload, RaftNode};
 use cloud9_raft::{Command, LogIndex, NodeId};
 
 fn optimized_config(id: NodeId) -> Config {
@@ -47,11 +46,7 @@ impl TestCluster {
             let node = RaftNode::new(config, node_ids);
             nodes.insert(id, node);
         }
-        Self {
-            nodes,
-            pending_messages: Vec::new(),
-            round_trips: 0,
-        }
+        Self { nodes, pending_messages: Vec::new(), round_trips: 0 }
     }
 
     fn tick_all(&mut self) {
@@ -79,14 +74,11 @@ impl TestCluster {
     }
 
     fn leader(&self) -> Option<NodeId> {
-        self.nodes
-            .iter()
-            .find(|(_, n)| n.is_leader())
-            .map(|(&id, _)| id)
+        self.nodes.iter().find(|(_, n)| n.is_leader()).map(|(&id, _)| id)
     }
 
     fn commit_index(&self, id: NodeId) -> LogIndex {
-        self.nodes.get(&id).map(|n| n.commit_index()).unwrap_or(0)
+        self.nodes.get(&id).map_or(0, cloud9_raft::RaftNode::commit_index)
     }
 
     fn propose(&mut self, leader_id: NodeId, data: Vec<u8>) -> Option<(LogIndex, Vec<Message>)> {
@@ -120,7 +112,7 @@ impl TestCluster {
 /// Parallel disk write: leader can make progress with followers while disk write pending.
 ///
 /// Per dissertation §10.2.1: "With the optimization, the leader would issue
-/// AppendEntries RPCs to its disk and followers in parallel, with the disk
+/// `AppendEntries` RPCs to its disk and followers in parallel, with the disk
 /// treated similarly to a follower."
 #[test]
 fn parallel_disk_write_correctness() {
@@ -205,7 +197,7 @@ fn naive_disk_write_blocks_until_self_written() {
     );
 }
 
-/// Single-node cluster with parallel disk write requires explicit DiskWriteComplete.
+/// Single-node cluster with parallel disk write requires explicit `DiskWriteComplete`.
 #[test]
 fn single_node_parallel_disk_write() {
     let config = optimized_config(NodeId(0));
@@ -224,11 +216,7 @@ fn single_node_parallel_disk_write() {
 
     // Signal disk write complete
     node.disk_write_complete(1);
-    assert_eq!(
-        node.commit_index(),
-        1,
-        "should commit after disk write completes"
-    );
+    assert_eq!(node.commit_index(), 1, "should commit after disk write completes");
 }
 
 /// Single-node cluster without parallel disk write commits immediately.
@@ -255,7 +243,7 @@ fn single_node_naive_commits_immediately() {
 
 /// Pipelining: leader can send multiple batches without waiting for ACKs.
 ///
-/// Per dissertation §10.2.2: "the leader sends additional AppendEntries RPCs
+/// Per dissertation §10.2.2: "the leader sends additional `AppendEntries` RPCs
 /// without waiting for acknowledgments from the follower."
 #[test]
 fn pipelining_sends_without_waiting() {
@@ -281,10 +269,7 @@ fn pipelining_sends_without_waiting() {
 
     // Key: messages should include ALL entries to each follower
     // because next_index is updated optimistically
-    assert!(
-        messages_before_ack >= 2,
-        "pipelining should send without waiting for ACKs"
-    );
+    assert!(messages_before_ack >= 2, "pipelining should send without waiting for ACKs");
 
     // Check that messages include later entries
     let has_entry_5 = cluster.pending_messages.iter().any(|m| {
@@ -353,7 +338,7 @@ fn pipelining_handles_rejection() {
     let reject = Message {
         from: NodeId(1),
         to: leader,
-        term: cluster.nodes.get(&leader).unwrap().term(),
+        term: cluster.nodes[&leader].term(),
         payload: Payload::AppendResponse(AppendResponse {
             success: false,
             last_log_index: 0, // Follower is behind
@@ -363,10 +348,7 @@ fn pipelining_handles_rejection() {
     if let Some(node) = cluster.nodes.get_mut(&leader) {
         let effects = node.step(reject);
         // Leader should retry with decremented next_index
-        assert!(
-            !effects.messages.is_empty(),
-            "should retry after rejection"
-        );
+        assert!(!effects.messages.is_empty(), "should retry after rejection");
     }
 }
 
@@ -405,11 +387,7 @@ fn optimized_commit_efficiency() {
         cluster.round_trips
     );
 
-    assert_eq!(
-        cluster.commit_index(leader),
-        10,
-        "all entries should be committed"
-    );
+    assert_eq!(cluster.commit_index(leader), 10, "all entries should be committed");
 }
 
 /// Measures round-trips needed to commit N entries with optimizations disabled.
@@ -438,18 +416,10 @@ fn naive_commit_efficiency() {
     // Record for comparison (no strict assertion - just documenting behavior)
     let naive_trips = cluster.round_trips;
 
-    assert_eq!(
-        cluster.commit_index(leader),
-        10,
-        "all entries should be committed"
-    );
+    assert_eq!(cluster.commit_index(leader), 10, "all entries should be committed");
 
     // Sanity check: should complete eventually
-    assert!(
-        naive_trips < 50,
-        "naive should complete in bounded time, took {}",
-        naive_trips
-    );
+    assert!(naive_trips < 50, "naive should complete in bounded time, took {naive_trips}");
 }
 
 /// Direct comparison: optimized vs naive round-trips.
@@ -496,14 +466,9 @@ fn optimization_provides_benefit() {
     // should never be worse)
     assert!(
         opt_trips <= naive_trips + 1,
-        "optimized ({} trips) should not be significantly worse than naive ({} trips)",
-        opt_trips,
-        naive_trips
+        "optimized ({opt_trips} trips) should not be significantly worse than naive ({naive_trips} trips)"
     );
 
     // Log for visibility
-    eprintln!(
-        "Performance comparison: optimized={} trips, naive={} trips",
-        opt_trips, naive_trips
-    );
+    eprintln!("Performance comparison: optimized={opt_trips} trips, naive={naive_trips} trips");
 }

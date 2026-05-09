@@ -41,31 +41,31 @@ pub struct Message {
 /// Message payload variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Payload {
-    /// PreVote RPC (§4.2.3) - checks if election would succeed without incrementing term.
+    /// `PreVote` RPC (§4.2.3) - checks if election would succeed without incrementing term.
     PreVoteRequest(PreVoteRequest),
-    /// PreVote response
+    /// `PreVote` response
     PreVoteResponse(PreVoteResponse),
-    /// RequestVote RPC (§3.4)
+    /// `RequestVote` RPC (§3.4)
     VoteRequest(VoteRequest),
-    /// RequestVote response
+    /// `RequestVote` response
     VoteResponse(VoteResponse),
-    /// AppendEntries RPC (§3.5)
+    /// `AppendEntries` RPC (§3.5)
     AppendRequest(AppendRequest),
-    /// AppendEntries response
+    /// `AppendEntries` response
     AppendResponse(AppendResponse),
-    /// InstallSnapshot RPC (§5) - sent when follower is too far behind.
+    /// `InstallSnapshot` RPC (§5) - sent when follower is too far behind.
     InstallSnapshotRequest(InstallSnapshotRequest),
-    /// InstallSnapshot response
+    /// `InstallSnapshot` response
     InstallSnapshotResponse(InstallSnapshotResponse),
     /// Leadership transfer: target should start election immediately (§3.10)
     TimeoutNow,
 }
 
-/// PreVote request (§4.2.3).
+/// `PreVote` request (§4.2.3).
 ///
-/// Like VoteRequest but doesn't increment the sender's term. Used to check
+/// Like `VoteRequest` but doesn't increment the sender's term. Used to check
 /// if an election would succeed before disrupting the cluster.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PreVoteRequest {
     /// The term the candidate would use if elected.
     pub next_term: Term,
@@ -73,7 +73,7 @@ pub struct PreVoteRequest {
     pub last_log_term: Term,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PreVoteResponse {
     /// The responder's current term.
     pub term: Term,
@@ -81,13 +81,13 @@ pub struct PreVoteResponse {
     pub granted: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct VoteRequest {
     pub last_log_index: LogIndex,
     pub last_log_term: Term,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct VoteResponse {
     pub granted: bool,
 }
@@ -100,13 +100,13 @@ pub struct AppendRequest {
     pub leader_commit: LogIndex,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AppendResponse {
     pub success: bool,
     pub last_log_index: LogIndex,
 }
 
-/// InstallSnapshot request (§5, Figure 5.3).
+/// `InstallSnapshot` request (§5, Figure 5.3).
 ///
 /// Sent by the leader when a follower is too far behind and needs the snapshot
 /// rather than log entries (§5: "if a follower's log is so far behind the
@@ -115,7 +115,7 @@ pub struct AppendResponse {
 /// This message carries metadata only — actual snapshot data transfer is
 /// handled by the I/O layer. The full RPC in Figure 5.3 includes `offset`,
 /// `data[]`, and `done` fields for chunked transfer; we delegate that to I/O.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct InstallSnapshotRequest {
     /// Index of the last entry included in the snapshot.
     /// Corresponds to `lastIncludedIndex` in Figure 5.3.
@@ -125,7 +125,7 @@ pub struct InstallSnapshotRequest {
     pub last_included_term: Term,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct InstallSnapshotResponse {
     /// True if the snapshot was accepted.
     /// Per §5, follower should accept if snapshot is more recent than its log.
@@ -147,7 +147,7 @@ pub struct Effects {
     pub messages: Vec<Message>,
     /// Snapshot to send to a follower (leader only).
     /// The I/O layer should transfer the snapshot data and then send
-    /// an InstallSnapshotRequest to the follower.
+    /// an `InstallSnapshotRequest` to the follower.
     pub send_snapshot: Option<SendSnapshot>,
 }
 
@@ -167,26 +167,31 @@ impl Effects {
         Self::default()
     }
 
+    #[must_use]
     pub fn with_persist(mut self) -> Self {
         self.persist = true;
         self
     }
 
+    #[must_use]
     pub fn with_message(mut self, msg: Message) -> Self {
         self.messages.push(msg);
         self
     }
 
+    #[must_use]
     pub fn with_messages(mut self, msgs: impl IntoIterator<Item = Message>) -> Self {
         self.messages.extend(msgs);
         self
     }
 
+    #[must_use]
     pub fn with_send_snapshot(mut self, snapshot: SendSnapshot) -> Self {
         self.send_snapshot = Some(snapshot);
         self
     }
 
+    #[must_use]
     pub fn merge(mut self, other: Effects) -> Self {
         self.persist |= other.persist;
         self.messages.extend(other.messages);
@@ -203,14 +208,12 @@ mod tests {
 
     #[test]
     fn effects_builder() {
-        let effects = Effects::none()
-            .with_persist()
-            .with_message(Message {
-                from: NodeId(0),
-                to: NodeId(1),
-                term: 1,
-                payload: Payload::TimeoutNow,
-            });
+        let effects = Effects::none().with_persist().with_message(Message {
+            from: NodeId(0),
+            to: NodeId(1),
+            term: 1,
+            payload: Payload::TimeoutNow,
+        });
 
         assert!(effects.persist);
         assert_eq!(effects.messages.len(), 1);

@@ -43,19 +43,28 @@ pub trait Storage: Send + Sync {
     ///
     /// Per §3.8, this must complete before responding to any RPC.
     /// If `sync` is true, the implementation should fsync to ensure durability.
-    fn save(&self, state: &Persistent, sync: bool) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn save(
+        &self,
+        state: &Persistent,
+        sync: bool,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Load snapshot data for transfer to a slow follower (§5).
     ///
     /// Returns the snapshot data as bytes. The format is opaque to Raft —
     /// the state machine defines it.
-    fn load_snapshot(&self) -> impl Future<Output = Result<Option<SnapshotData>, StorageError>> + Send;
+    fn load_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<Option<SnapshotData>, StorageError>> + Send;
 
     /// Save snapshot data received from the leader (§5).
     ///
-    /// Called when a follower receives InstallSnapshot. The implementation
+    /// Called when a follower receives `InstallSnapshot`. The implementation
     /// should atomically replace any existing snapshot.
-    fn save_snapshot(&self, snapshot: SnapshotData) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn save_snapshot(
+        &self,
+        snapshot: SnapshotData,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 }
 
 /// Snapshot data for transfer between nodes (§5).

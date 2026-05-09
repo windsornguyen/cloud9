@@ -1,9 +1,9 @@
 //! Leader role.
 //!
 //! A leader:
-//! - Sends heartbeats (empty AppendEntries) periodically
+//! - Sends heartbeats (empty `AppendEntries`) periodically
 //! - Replicates log entries to all followers
-//! - Tracks replication progress per peer (next_index, match_index)
+//! - Tracks replication progress per peer (`next_index`, `match_index`)
 //! - Commits entries once replicated to a majority
 //! - Steps down on discovering higher term
 //!
@@ -14,18 +14,18 @@
 
 use crate::{Command, LogIndex, NodeId, TransferError};
 
+use super::StepResult;
 use super::core::Core;
 use super::event::{
     AppendRequest, AppendResponse, Effects, Event, Message, Payload, PreVoteResponse, SendSnapshot,
-    VoteRequest, VoteResponse,
+    VoteResponse,
 };
 use super::log::{Entry, EntryPayload};
 use super::membership::{ConfigChange, ConfigChangeError};
-use super::StepResult;
 
 /// Result of processing committed config entries.
 enum ConfigCommitResult {
-    /// Continue processing (appended C_new, may need to commit it).
+    /// Continue processing (appended `C_new`, may need to commit it).
     Continue(Effects),
     /// Must step down (removed from config), with optional leadership transfer.
     StepDown(Effects),
@@ -36,7 +36,7 @@ enum ConfigCommitResult {
 /// Leader role state.
 #[derive(Debug, Clone)]
 pub struct Leader {
-    /// Next log index to send to each peer (keyed by NodeId).
+    /// Next log index to send to each peer (keyed by `NodeId`).
     pub next_index: std::collections::BTreeMap<NodeId, LogIndex>,
     /// Highest log index known to be replicated on each peer.
     pub match_index: std::collections::BTreeMap<NodeId, LogIndex>,
@@ -127,15 +127,11 @@ impl Leader {
 
     /// Propose a command for replication.
     ///
-    /// Returns (index, effects, should_step_down). The caller should check
-    /// should_step_down and transition to follower if true.
+    /// Returns (index, effects, `should_step_down`). The caller should check
+    /// `should_step_down` and transition to follower if true.
     pub fn propose(&mut self, core: &mut Core, cmd: Command) -> (LogIndex, Effects, bool) {
         let index = core.log().last_index() + 1;
-        let entry = Entry {
-            term: core.term(),
-            index,
-            payload: EntryPayload::Command(cmd),
-        };
+        let entry = Entry { term: core.term(), index, payload: EntryPayload::Command(cmd) };
         core.log_mut().append(entry);
 
         // Update own match_index only if parallel_disk_write is disabled.
@@ -158,24 +154,28 @@ impl Leader {
     /// Per §4, the new configuration takes effect immediately when appended
     /// (not when committed). Only one config change can be pending at a time.
     ///
-    /// Returns (index, effects, should_step_down) on success.
+    /// Returns (index, effects, `should_step_down`) on success.
     pub fn propose_config_change(
         &mut self,
         core: &mut Core,
-        change: ConfigChange,
+        change: &ConfigChange,
     ) -> Result<(LogIndex, Effects, bool), ConfigChangeError> {
         // Validate the change
         let current = core.effective_config();
         change.validate(&current, core.config.membership_mode)?;
 
         // Enforce learner catch-up before promotion.
-        if let ConfigChange::AddVoter(id) = change {
+        if let ConfigChange::AddVoter(id) = *change {
             // If we're promoting a learner, ensure it is caught up.
             if current.is_learner(id) {
                 let progressed = self.match_index.get(&id).copied().unwrap_or(0);
                 let need = core.log().last_index();
                 if progressed < need {
-                    return Err(ConfigChangeError::LearnerNotCaughtUp { id, have: progressed, need });
+                    return Err(ConfigChangeError::LearnerNotCaughtUp {
+                        id,
+                        have: progressed,
+                        need,
+                    });
                 }
             } else {
                 // Should have been rejected by validate(), but double-check.
@@ -193,11 +193,7 @@ impl Leader {
 
         // Create config entry
         let index = core.log().last_index() + 1;
-        let entry = Entry {
-            term: core.term(),
-            index,
-            payload: EntryPayload::Config(new_config),
-        };
+        let entry = Entry { term: core.term(), index, payload: EntryPayload::Config(new_config) };
         core.log_mut().append(entry);
 
         // Config takes effect immediately (§4) - effective_config() reflects this
@@ -235,7 +231,7 @@ impl Leader {
 
     /// Transfer leadership to the target node (§3.11).
     ///
-    /// Sends TimeoutNow to the target if it is caught up. The target will
+    /// Sends `TimeoutNow` to the target if it is caught up. The target will
     /// immediately start an election and (assuming it wins) become leader.
     ///
     /// # Errors
@@ -285,7 +281,7 @@ impl Leader {
             Event::Message(msg) => {
                 // PreVoteRequest doesn't update term - deny as leader
                 if let Payload::PreVoteRequest(_) = msg.payload {
-                    return StepResult::stay(self.deny_prevote(core, msg.from));
+                    return StepResult::stay(Self::deny_prevote(core, msg.from));
                 }
 
                 // Higher term: step down
@@ -298,12 +294,14 @@ impl Leader {
 
                 // Stale term: reject
                 if msg.term < core.term() {
-                    return StepResult::stay(self.reject_stale(core, &msg));
+                    return StepResult::stay(Self::reject_stale(core, &msg));
                 }
 
                 match msg.payload {
-                    Payload::AppendResponse(resp) => self.handle_append_response(core, msg.from, resp),
-                    Payload::VoteRequest(req) => self.handle_vote_request(core, msg.from, req),
+                    Payload::AppendResponse(resp) => {
+                        self.handle_append_response(core, msg.from, resp)
+                    }
+                    Payload::VoteRequest(_) => Self::handle_vote_request(core, msg.from),
                     _ => StepResult::none(),
                 }
             }
@@ -313,7 +311,7 @@ impl Leader {
     /// Handle disk write completion (§10.2.1 parallel disk write).
     ///
     /// Called by the IO layer when persistent state has been written to disk.
-    /// Updates the leader's own match_index, which may allow more commits.
+    /// Updates the leader's own `match_index`, which may allow more commits.
     fn handle_disk_write_complete(&mut self, core: &mut Core, index: LogIndex) -> StepResult {
         // Update our own match_index to reflect persisted state
         let current = self.match_index.get(&core.id()).copied().unwrap_or(0);
@@ -385,12 +383,7 @@ impl Leader {
         }
     }
 
-    fn handle_vote_request(
-        &self,
-        core: &Core,
-        from: NodeId,
-        _req: VoteRequest,
-    ) -> StepResult {
+    fn handle_vote_request(core: &Core, from: NodeId) -> StepResult {
         // We're leader in this term, deny vote
         let resp = Message {
             from: core.id(),
@@ -401,7 +394,7 @@ impl Leader {
         StepResult::stay(Effects::none().with_message(resp))
     }
 
-    fn deny_prevote(&self, core: &Core, from: NodeId) -> Effects {
+    fn deny_prevote(core: &Core, from: NodeId) -> Effects {
         // As leader, always deny pre-votes - we're the authority for this term
         Effects::none().with_message(Message {
             from: core.id(),
@@ -414,7 +407,7 @@ impl Leader {
         })
     }
 
-    fn reject_stale(&self, core: &Core, msg: &Message) -> Effects {
+    fn reject_stale(core: &Core, msg: &Message) -> Effects {
         let payload = match &msg.payload {
             Payload::VoteRequest(_) => Payload::VoteResponse(VoteResponse { granted: false }),
             Payload::AppendRequest(_) => Payload::AppendResponse(AppendResponse {
@@ -431,12 +424,12 @@ impl Leader {
         })
     }
 
-    /// Try to advance commit_index based on match_index majority.
+    /// Try to advance `commit_index` based on `match_index` majority.
     ///
     /// For joint consensus, requires majorities from both old and new configs.
-    /// Returns (effects, should_step_down) where:
+    /// Returns (effects, `should_step_down`) where:
     /// - effects: messages to send (e.g., for auto-completing joint consensus or leadership transfer)
-    /// - should_step_down: true if we should step down (removed from config)
+    /// - `should_step_down`: true if we should step down (removed from config)
     pub fn maybe_commit(&mut self, core: &mut Core) -> (Effects, bool) {
         let mut effects = Effects::none();
 
@@ -466,7 +459,7 @@ impl Leader {
         (effects, false)
     }
 
-    /// Find the highest log index that has quorum and update commit_index.
+    /// Find the highest log index that has quorum and update `commit_index`.
     ///
     /// Only commits entries from the current term (§3.6.2).
     fn advance_commit_index(&self, core: &mut Core) {
@@ -492,8 +485,12 @@ impl Leader {
 
     /// Process config entries that were just committed.
     ///
-    /// Returns whether to continue (possibly appended C_new), step down, or done.
-    fn process_committed_configs(&mut self, core: &mut Core, old_commit: LogIndex) -> ConfigCommitResult {
+    /// Returns whether to continue (possibly appended `C_new`), step down, or done.
+    fn process_committed_configs(
+        &mut self,
+        core: &mut Core,
+        old_commit: LogIndex,
+    ) -> ConfigCommitResult {
         for idx in (old_commit + 1)..=core.commit_index {
             let Some(entry) = core.log().get(idx) else { continue };
             let EntryPayload::Config(ref cfg) = entry.payload else { continue };
@@ -518,9 +515,13 @@ impl Leader {
     /// Try to automatically transfer leadership to a caught-up voter (§4.2.2).
     ///
     /// Called when the leader is removed from the configuration. Finds the most
-    /// caught-up voter in the new config and sends TimeoutNow to trigger immediate
+    /// caught-up voter in the new config and sends `TimeoutNow` to trigger immediate
     /// election.
-    fn try_auto_transfer(&self, core: &Core, new_config: &super::membership::Configuration) -> Effects {
+    fn try_auto_transfer(
+        &self,
+        core: &Core,
+        new_config: &super::membership::Configuration,
+    ) -> Effects {
         let last_index = core.log().last_index();
 
         // Find voters in the new config that are caught up (match_index == last_index)
@@ -548,22 +549,22 @@ impl Leader {
         }
 
         // Only send TimeoutNow if we found a caught-up target
-        if let Some((target, match_idx)) = best_target {
-            if match_idx >= last_index {
-                return Effects::none().with_message(Message {
-                    from: core.id(),
-                    to: target,
-                    term: core.term(),
-                    payload: Payload::TimeoutNow,
-                });
-            }
+        if let Some((target, match_idx)) = best_target
+            && match_idx >= last_index
+        {
+            return Effects::none().with_message(Message {
+                from: core.id(),
+                to: target,
+                term: core.term(),
+                payload: Payload::TimeoutNow,
+            });
         }
 
         // No suitable target found - just step down and let election happen
         Effects::none()
     }
 
-    /// Append the C_new config to complete a joint consensus transition.
+    /// Append the `C_new` config to complete a joint consensus transition.
     fn append_transition_target(
         &mut self,
         core: &mut Core,
@@ -583,22 +584,20 @@ impl Leader {
         self.broadcast_append(core).with_persist()
     }
 
-    /// Send AppendEntries to all peers.
+    /// Send `AppendEntries` to all peers.
     fn broadcast_append(&mut self, core: &Core) -> Effects {
         core.effective_config()
             .replication_peers(core.id())
-            .fold(Effects::none(), |eff, peer| {
-                eff.merge(self.send_append_to(core, peer))
-            })
+            .fold(Effects::none(), |eff, peer| eff.merge(self.send_append_to(core, peer)))
     }
 
-    /// Send AppendEntries to a specific peer, or request snapshot if entries unavailable.
+    /// Send `AppendEntries` to a specific peer, or request snapshot if entries unavailable.
     ///
     /// Per §5: "if a follower's log is so far behind the leader's that the
     /// leader has discarded the next entry it needs to send to the follower",
-    /// the leader sends InstallSnapshot instead.
+    /// the leader sends `InstallSnapshot` instead.
     ///
-    /// When pipelining is enabled (§10.2.2), optimistically updates next_index
+    /// When pipelining is enabled (§10.2.2), optimistically updates `next_index`
     /// after sending, allowing multiple in-flight requests.
     fn send_append_to(&mut self, core: &Core, to: NodeId) -> Effects {
         let next = *self.next_index.get(&to).unwrap_or(&1);
@@ -625,7 +624,7 @@ impl Leader {
         let last_log = core.log().last_index();
         let end = (next + core.config.max_entries_per_msg).min(last_log + 1);
         let entries: Vec<_> = core.log().slice(next, end).to_vec();
-        let sent_up_to = if entries.is_empty() { next } else { entries.last().unwrap().index + 1 };
+        let sent_up_to = entries.last().map_or(next, |entry| entry.index + 1);
 
         // Pipelining (§10.2.2): optimistically update next_index after sending
         if core.config.pipelining && sent_up_to > next {
@@ -652,9 +651,10 @@ impl Leader {
 mod tests {
     use super::*;
 
-    use super::super::core::Config;
-    use super::super::log::EntryPayload;
     use super::super::Transition;
+    use super::super::core::Config;
+    use super::super::event::VoteRequest;
+    use super::super::log::EntryPayload;
 
     fn test_setup() -> (Core, Leader, Effects) {
         let config = Config::new(NodeId(0))
@@ -686,7 +686,7 @@ mod tests {
         let (core, leader, _) = test_setup();
 
         for id in core.effective_config().all_nodes() {
-            assert_eq!(*leader.next_index.get(&id).unwrap(), 1); // last_index(0) + 1
+            assert_eq!(leader.next_index[&id], 1); // last_index(0) + 1
         }
     }
 
@@ -721,9 +721,7 @@ mod tests {
 
     #[test]
     fn single_node_commits_immediately() {
-        let config = Config::new(NodeId(0))
-            .with_parallel_disk_write(false)
-            .with_pipelining(false);
+        let config = Config::new(NodeId(0)).with_parallel_disk_write(false).with_pipelining(false);
         let mut core = Core::new(config, &[NodeId(0)]);
         core.persistent.term = 1;
         let (mut leader, _) = Leader::new(&mut core);
@@ -746,10 +744,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 1,
-            payload: Payload::AppendResponse(AppendResponse {
-                success: true,
-                last_log_index: 1,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: true, last_log_index: 1 }),
         };
 
         leader.step(&mut core, Event::Message(msg));
@@ -786,7 +781,7 @@ mod tests {
         let StepResult { effects, .. } = leader.step(&mut core, Event::Message(msg));
 
         // Should decrement next_index and retry
-        assert!(*leader.next_index.get(&NodeId(1)).unwrap() <= 1);
+        assert!(leader.next_index[&NodeId(1)] <= 1);
         assert_eq!(effects.messages.len(), 1);
     }
 
@@ -798,10 +793,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 5, // Higher than our term 1
-            payload: Payload::AppendResponse(AppendResponse {
-                success: false,
-                last_log_index: 0,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: false, last_log_index: 0 }),
         };
 
         let StepResult { transition, effects } = leader.step(&mut core, Event::Message(msg));
@@ -856,10 +848,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 1,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
 
         let StepResult { transition, effects } = leader.step(&mut core, Event::Message(msg));
@@ -959,9 +948,7 @@ mod tests {
     #[test]
     fn can_serve_reads_after_current_term_commit() {
         // Use single-node cluster where propose commits immediately
-        let config = Config::new(NodeId(0))
-            .with_parallel_disk_write(false)
-            .with_pipelining(false);
+        let config = Config::new(NodeId(0)).with_parallel_disk_write(false).with_pipelining(false);
         let mut single_core = Core::new(config, &[NodeId(0)]);
         single_core.persistent.term = 1;
         let (mut single_leader, _) = Leader::new(&mut single_core);
@@ -979,9 +966,7 @@ mod tests {
 
     #[test]
     fn read_index_returns_commit_index() {
-        let config = Config::new(NodeId(0))
-            .with_parallel_disk_write(false)
-            .with_pipelining(false);
+        let config = Config::new(NodeId(0)).with_parallel_disk_write(false).with_pipelining(false);
         let mut core = Core::new(config, &[NodeId(0)]);
         core.persistent.term = 1;
         let (mut leader, _) = Leader::new(&mut core);

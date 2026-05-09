@@ -1,4 +1,5 @@
 //! Property-based testing for Raft consensus.
+#![allow(clippy::cast_possible_truncation)]
 //!
 //! Uses proptest to verify invariants hold under random event sequences.
 //!
@@ -19,9 +20,7 @@ use cloud9_raft::{LogIndex, NodeId, Term};
 const TEST_NODES: &[NodeId] = &[NodeId(0), NodeId(1), NodeId(2)];
 
 fn test_config(id: NodeId) -> Config {
-    Config::new(id)
-        .with_prevote(false)
-        .with_election_timeout(5, 10)
+    Config::new(id).with_prevote(false).with_election_timeout(5, 10)
 }
 
 // --- Arbitrary Generators ---
@@ -39,10 +38,8 @@ fn arb_log_index() -> impl Strategy<Value = LogIndex> {
 }
 
 fn arb_vote_request() -> impl Strategy<Value = VoteRequest> {
-    (arb_log_index(), arb_term()).prop_map(|(last_log_index, last_log_term)| VoteRequest {
-        last_log_index,
-        last_log_term,
-    })
+    (arb_log_index(), arb_term())
+        .prop_map(|(last_log_index, last_log_term)| VoteRequest { last_log_index, last_log_term })
 }
 
 fn arb_vote_response() -> impl Strategy<Value = VoteResponse> {
@@ -75,10 +72,8 @@ fn arb_append_request() -> impl Strategy<Value = AppendRequest> {
 }
 
 fn arb_append_response() -> impl Strategy<Value = AppendResponse> {
-    (any::<bool>(), arb_log_index()).prop_map(|(success, last_log_index)| AppendResponse {
-        success,
-        last_log_index,
-    })
+    (any::<bool>(), arb_log_index())
+        .prop_map(|(success, last_log_index)| AppendResponse { success, last_log_index })
 }
 
 fn arb_payload() -> impl Strategy<Value = Payload> {
@@ -94,14 +89,8 @@ fn arb_payload() -> impl Strategy<Value = Payload> {
 }
 
 fn arb_message() -> impl Strategy<Value = Message> {
-    (arb_node_id(), arb_node_id(), arb_term(), arb_payload()).prop_map(
-        |(from, to, term, payload)| Message {
-            from,
-            to,
-            term,
-            payload,
-        },
-    )
+    (arb_node_id(), arb_node_id(), arb_term(), arb_payload())
+        .prop_map(|(from, to, term, payload)| Message { from, to, term, payload })
 }
 
 fn arb_event() -> impl Strategy<Value = Event> {
@@ -131,10 +120,10 @@ fn check_log_continuity(node: &RaftNode) -> bool {
         if log.get(i).is_none() {
             return false;
         }
-        if let Some(entry) = log.get(i) {
-            if entry.index != i {
-                return false;
-            }
+        if let Some(entry) = log.get(i)
+            && entry.index != i
+        {
+            return false;
         }
     }
     true
@@ -232,17 +221,12 @@ impl ClusterSim {
             .iter()
             .map(|&id| {
                 RaftNode::new(
-                    Config::new(id)
-                        .with_prevote(false)
-                        .with_election_timeout(5, 10),
+                    Config::new(id).with_prevote(false).with_election_timeout(5, 10),
                     &voters,
                 )
             })
             .collect();
-        Self {
-            nodes,
-            pending_messages: vec![],
-        }
+        Self { nodes, pending_messages: vec![] }
     }
 
     fn tick_all(&mut self) {
@@ -270,11 +254,7 @@ impl ClusterSim {
     }
 
     fn leaders(&self) -> Vec<(NodeId, Term)> {
-        self.nodes
-            .iter()
-            .filter(|n| n.is_leader())
-            .map(|n| (n.id(), n.term()))
-            .collect()
+        self.nodes.iter().filter(|n| n.is_leader()).map(|n| (n.id(), n.term())).collect()
     }
 
     fn election_safety(&self) -> bool {

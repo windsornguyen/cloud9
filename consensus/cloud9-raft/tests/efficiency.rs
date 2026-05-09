@@ -1,4 +1,5 @@
 //! Efficiency and non-redundancy integration tests.
+#![allow(clippy::cast_possible_truncation, clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //!
 //! These tests verify the implementation does no unnecessary work:
 //! - No duplicate messages or wasted RPCs
@@ -11,15 +12,13 @@
 use std::collections::HashMap;
 
 use cloud9_raft::raft::{
-    AppendRequest, AppendResponse, Config, Entry, EntryPayload, Message, Payload,
-    PreVoteResponse, RaftNode, VoteResponse,
+    AppendRequest, AppendResponse, Config, Entry, EntryPayload, Message, Payload, PreVoteResponse,
+    RaftNode, VoteResponse,
 };
 use cloud9_raft::{Command, NodeId};
 
 fn test_config(id: NodeId) -> Config {
-    Config::new(id)
-        .with_election_timeout(10, 20)
-        .with_heartbeat_interval(3)
+    Config::new(id).with_election_timeout(10, 20).with_heartbeat_interval(3)
 }
 
 fn classify_message(payload: &Payload) -> &'static str {
@@ -53,11 +52,7 @@ impl TestCluster {
             let node = RaftNode::new(config, node_ids);
             nodes.insert(id, node);
         }
-        Self {
-            nodes,
-            pending_messages: Vec::new(),
-            message_counts: HashMap::new(),
-        }
+        Self { nodes, pending_messages: Vec::new(), message_counts: HashMap::new() }
     }
 
     fn tick_all(&mut self) {
@@ -99,26 +94,19 @@ impl TestCluster {
     }
 
     fn leader(&self) -> Option<NodeId> {
-        self.nodes
-            .iter()
-            .find(|(_, n)| n.is_leader())
-            .map(|(&id, _)| id)
+        self.nodes.iter().find(|(_, n)| n.is_leader()).map(|(&id, _)| id)
     }
 
     fn leaders(&self) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|(_, n)| n.is_leader())
-            .map(|(&id, _)| id)
-            .collect()
+        self.nodes.iter().filter(|(_, n)| n.is_leader()).map(|(&id, _)| id).collect()
     }
 
     fn term(&self, id: NodeId) -> u64 {
-        self.nodes.get(&id).map(|n| n.term()).unwrap_or(0)
+        self.nodes.get(&id).map_or(0, cloud9_raft::RaftNode::term)
     }
 
     fn max_term(&self) -> u64 {
-        self.nodes.values().map(|n| n.term()).max().unwrap_or(0)
+        self.nodes.values().map(cloud9_raft::RaftNode::term).max().unwrap_or(0)
     }
 
     fn message_count(&self, msg_type: &str) -> usize {
@@ -134,7 +122,7 @@ impl TestCluster {
 // PreVote Efficiency Tests (§9.4)
 // =============================================================================
 
-/// PreVote prevents a partitioned server from disrupting the cluster on rejoin.
+/// `PreVote` prevents a partitioned server from disrupting the cluster on rejoin.
 ///
 /// Per dissertation §9.4: "While a server is partitioned, it won't be able to
 /// increment its term, since it can't receive permission from a majority."
@@ -164,27 +152,18 @@ fn prevote_prevents_term_inflation_during_partition() {
     // With PreVote, node 4 should send PreVoteRequests, not VoteRequests
     // and should NOT increment its term
     let node4_term = cluster.term(NodeId(4));
-    assert_eq!(
-        node4_term, initial_term,
-        "partitioned node should not inflate term with PreVote"
-    );
+    assert_eq!(node4_term, initial_term, "partitioned node should not inflate term with PreVote");
 
     // Should have sent PreVoteRequests, not VoteRequests
     let prevote_count = cluster.message_count("PreVoteRequest");
     let vote_count = cluster.message_count("VoteRequest");
-    assert!(
-        prevote_count > 0,
-        "should send PreVoteRequests while partitioned"
-    );
-    assert_eq!(
-        vote_count, 0,
-        "should NOT send VoteRequests without PreVote success"
-    );
+    assert!(prevote_count > 0, "should send PreVoteRequests while partitioned");
+    assert_eq!(vote_count, 0, "should NOT send VoteRequests without PreVote success");
 }
 
 /// When a partitioned server rejoins, it doesn't disrupt the existing leader.
 ///
-/// This is a key PreVote invariant: a partitioned node shouldn't be able to
+/// This is a key `PreVote` invariant: a partitioned node shouldn't be able to
 /// disrupt a healthy cluster when it reconnects.
 #[test]
 fn partitioned_server_rejoin_no_disruption() {
@@ -229,8 +208,7 @@ fn partitioned_server_rejoin_no_disruption() {
     // so there's no reason for the cluster term to change
     assert_eq!(
         term_after, term_before,
-        "term should be unchanged after rejoin: {} vs {}",
-        term_before, term_after
+        "term should be unchanged after rejoin: {term_before} vs {term_after}"
     );
 
     // Leader should be the same (no disruption)
@@ -274,18 +252,14 @@ fn simultaneous_elections_converge() {
         }
     }
 
-    assert!(
-        rounds_to_leader > 0,
-        "should elect a leader after simultaneous timeout"
-    );
+    assert!(rounds_to_leader > 0, "should elect a leader after simultaneous timeout");
 
     // Convergence should happen in bounded time.
     // With randomized timeouts (10-20 ticks), worst case is several election
     // cycles. 50 rounds is very conservative - typically converges in < 10.
     assert!(
         rounds_to_leader < 50,
-        "cluster should converge in bounded time, took {} rounds",
-        rounds_to_leader
+        "cluster should converge in bounded time, took {rounds_to_leader} rounds"
     );
 
     // Should have exactly one leader
@@ -295,11 +269,7 @@ fn simultaneous_elections_converge() {
     // Each failed election increments term by 1 (PreVote -> Candidate).
     // With randomization, shouldn't need many election rounds.
     let max_term = cluster.max_term();
-    assert!(
-        max_term < 10,
-        "term should be bounded after convergence, got {}",
-        max_term
-    );
+    assert!(max_term < 10, "term should be bounded after convergence, got {max_term}");
 }
 
 /// Split vote situation eventually resolves due to randomized timeouts.
@@ -331,18 +301,14 @@ fn split_vote_resolves_with_randomization() {
         }
     }
 
-    assert!(
-        rounds_to_leader > 0,
-        "should eventually elect a leader after split votes"
-    );
+    assert!(rounds_to_leader > 0, "should eventually elect a leader after split votes");
 
     // Key invariant: randomization should resolve split votes reasonably quickly
     // Without randomization, 5 nodes could split-vote indefinitely
     // With randomization, expect resolution within ~10 rounds (very conservative)
     assert!(
         rounds_to_leader < 30,
-        "split vote should resolve quickly with randomization, took {} rounds",
-        rounds_to_leader
+        "split vote should resolve quickly with randomization, took {rounds_to_leader} rounds"
     );
 
     // Should have exactly one leader
@@ -350,20 +316,16 @@ fn split_vote_resolves_with_randomization() {
 
     // Term should be bounded - not inflated by repeated split votes
     let max_term = cluster.max_term();
-    assert!(
-        max_term < 10,
-        "term should be bounded after split vote resolution, got {}",
-        max_term
-    );
+    assert!(max_term < 10, "term should be bounded after split vote resolution, got {max_term}");
 }
 
 /// Candidate that receives heartbeat from valid leader steps down efficiently.
 ///
-/// Per Raft: A candidate that receives AppendEntries from a leader with term >= its own
+/// Per Raft: A candidate that receives `AppendEntries` from a leader with term >= its own
 /// should recognize the leader and revert to follower.
 ///
-/// Note: With PreVote enabled, the node transitions to PreCandidate first. When PreCandidate
-/// receives AppendEntries, it steps down to Follower but doesn't automatically respond to
+/// Note: With `PreVote` enabled, the node transitions to `PreCandidate` first. When `PreCandidate`
+/// receives `AppendEntries`, it steps down to Follower but doesn't automatically respond to
 /// the message that caused the step-down (the message is consumed during transition).
 /// To fully test the response, we send a second heartbeat after step-down.
 #[test]
@@ -395,10 +357,7 @@ fn candidate_steps_down_on_leader_heartbeat() {
     let effects = node.step(heartbeat.clone());
 
     // Node should step down to follower
-    assert!(
-        !node.is_leader(),
-        "node should not be leader after receiving heartbeat"
-    );
+    assert!(!node.is_leader(), "node should not be leader after receiving heartbeat");
 
     // PreCandidate step-down doesn't respond to the triggering message
     // (different from Follower which always responds to AppendRequest)
@@ -417,17 +376,14 @@ fn candidate_steps_down_on_leader_heartbeat() {
     assert!(!node.is_leader());
 
     // Total message count should be reasonable (just 1 response after step-down)
-    assert!(
-        effects.messages.len() <= 1,
-        "step-down should produce minimal messages"
-    );
+    assert!(effects.messages.len() <= 1, "step-down should produce minimal messages");
 }
 
 // =============================================================================
 // Replication Efficiency Tests
 // =============================================================================
 
-/// AppendEntries with already-committed entries is idempotent.
+/// `AppendEntries` with already-committed entries is idempotent.
 #[test]
 fn redundant_append_entries_idempotent() {
     let config = test_config(NodeId(0));
@@ -508,10 +464,7 @@ fn no_messages_to_self() {
     }
 
     // Sanity check: we actually saw some messages
-    assert!(
-        !all_messages_seen.is_empty(),
-        "test should have generated some messages"
-    );
+    assert!(!all_messages_seen.is_empty(), "test should have generated some messages");
 }
 
 /// Heartbeat responses don't trigger unnecessary work when follower is caught up.
@@ -532,20 +485,13 @@ fn heartbeat_ack_minimal_work() {
 
     // Verify precondition: leader has empty log (commit_index = 0)
     // This ensures follower claiming index 0 is actually "caught up"
-    let leader_commit = cluster.nodes.get(&leader).unwrap().commit_index();
-    assert_eq!(
-        leader_commit, 0,
-        "precondition: leader should have empty log for this test"
-    );
+    let leader_commit = cluster.nodes[&leader].commit_index();
+    assert_eq!(leader_commit, 0, "precondition: leader should have empty log for this test");
 
     cluster.reset_message_counts();
 
     // Send heartbeat ack from follower claiming to be at index 0 (caught up)
-    let follower = if leader == NodeId(0) {
-        NodeId(1)
-    } else {
-        NodeId(0)
-    };
+    let follower = if leader == NodeId(0) { NodeId(1) } else { NodeId(0) };
     let ack = Message {
         from: follower,
         to: leader,
@@ -564,10 +510,7 @@ fn heartbeat_ack_minimal_work() {
             effects.messages.is_empty(),
             "ack from caught-up follower should not generate messages"
         );
-        assert!(
-            !effects.persist,
-            "ack from caught-up follower should not require persistence"
-        );
+        assert!(!effects.persist, "ack from caught-up follower should not require persistence");
     }
 }
 
@@ -614,10 +557,7 @@ fn persistence_only_on_state_change() {
         }),
     };
     let effects_same = node.step(same_term);
-    assert!(
-        !effects_same.persist,
-        "heartbeat at same term should NOT require persistence"
-    );
+    assert!(!effects_same.persist, "heartbeat at same term should NOT require persistence");
 
     // Send heartbeat at HIGHER term - persistence required
     let higher_term = Message {
@@ -713,9 +653,7 @@ fn election_bounded_messages() {
             // With a few rounds of split votes, should be < 500 messages total
             assert!(
                 total_messages < 500,
-                "election took {} messages in {} rounds, should be bounded",
-                total_messages,
-                round
+                "election took {total_messages} messages in {round} rounds, should be bounded"
             );
             return;
         }
@@ -772,10 +710,7 @@ fn duplicate_votes_ignored() {
     node.step(vote1);
 
     // Now have 2 votes (self + NodeId(1)). Still not quorum.
-    assert!(
-        !node.is_leader(),
-        "should not be leader with only 2 votes in 5-node cluster"
-    );
+    assert!(!node.is_leader(), "should not be leader with only 2 votes in 5-node cluster");
 
     // Send DUPLICATE vote from NodeId(1) - should NOT count as third vote
     let vote_dup = Message {
@@ -810,9 +745,9 @@ fn duplicate_votes_ignored() {
     );
 }
 
-/// PreVote responses from same peer are ignored after first.
+/// `PreVote` responses from same peer are ignored after first.
 ///
-/// In PreVote, we need quorum before transitioning to Candidate.
+/// In `PreVote`, we need quorum before transitioning to Candidate.
 /// Duplicate responses from the same peer should not be double-counted.
 #[test]
 fn duplicate_prevote_responses_ignored() {

@@ -1,28 +1,27 @@
-//! PreCandidate role (§4.2.3).
+//! `PreCandidate` role (§4.2.3).
 //!
 //! A pre-candidate:
 //! - Does NOT increment term (avoids disrupting the cluster)
-//! - Sends PreVoteRequest to all peers
+//! - Sends `PreVoteRequest` to all peers
 //! - Wins pre-election with majority → becomes Candidate
-//! - Times out → restarts pre-election (stays PreCandidate)
+//! - Times out → restarts pre-election (stays `PreCandidate`)
 //! - Discovers higher term → becomes Follower
-//! - Receives AppendEntries from leader → becomes Follower
+//! - Receives `AppendEntries` from leader → becomes Follower
 //!
-//! PreVote prevents partitioned nodes from incrementing their term and
+//! `PreVote` prevents partitioned nodes from incrementing their term and
 //! disrupting the cluster when they rejoin. A pre-candidate only proceeds
 //! to a real election if it can win the pre-vote (proving it can reach
 //! a majority of nodes).
 
 use crate::NodeId;
 
+use super::StepResult;
 use super::core::Core;
 use super::event::{
-    AppendRequest, Effects, Event, Message, Payload, PreVoteRequest, PreVoteResponse, VoteRequest,
-    VoteResponse,
+    AppendRequest, Effects, Event, Message, Payload, PreVoteRequest, PreVoteResponse, VoteResponse,
 };
-use super::StepResult;
 
-/// PreCandidate role state.
+/// `PreCandidate` role state.
 #[derive(Debug, Clone)]
 pub struct PreCandidate {
     /// Set of peers who granted their pre-vote (including self).
@@ -36,8 +35,8 @@ pub struct PreCandidate {
 impl PreCandidate {
     /// Create a new pre-candidate, starting a pre-election.
     ///
-    /// Unlike Candidate::new(), this does NOT increment the term.
-    /// It sends PreVoteRequest to check if an election would succeed.
+    /// Unlike `Candidate::new()`, this does NOT increment the term.
+    /// It sends `PreVoteRequest` to check if an election would succeed.
     pub fn new(core: &mut Core) -> (Self, Effects) {
         let timeout = core.random_election_timeout();
         let mut precandidate = Self {
@@ -71,7 +70,7 @@ impl PreCandidate {
                 from: core.id(),
                 to: peer,
                 term: core.term(), // Use current term, not incremented
-                payload: Payload::PreVoteRequest(req.clone()),
+                payload: Payload::PreVoteRequest(req),
             })
             .collect();
 
@@ -97,10 +96,10 @@ impl PreCandidate {
             Event::DiskWriteComplete(_) => StepResult::none(),
             Event::Message(msg) => {
                 // Handle pre-vote requests - use same disruptive vote guard
-                if let Payload::PreVoteRequest(_) | Payload::VoteRequest(_) = msg.payload {
-                    if self.recently_heard_from_leader(core) {
-                        return StepResult::stay(self.deny_vote(core, &msg));
-                    }
+                if let Payload::PreVoteRequest(_) | Payload::VoteRequest(_) = msg.payload
+                    && self.recently_heard_from_leader(core)
+                {
+                    return StepResult::stay(Self::deny_vote(core, &msg));
                 }
 
                 // Higher term: become follower
@@ -117,9 +116,9 @@ impl PreCandidate {
                     }
                     Payload::AppendRequest(req) => self.handle_append_request(core, msg.from, req),
                     Payload::PreVoteRequest(req) => {
-                        self.handle_prevote_request(core, msg.from, msg.term, req)
+                        Self::handle_prevote_request(core, msg.from, msg.term, req)
                     }
-                    Payload::VoteRequest(req) => self.handle_vote_request(core, msg.from, req),
+                    Payload::VoteRequest(_) => Self::handle_vote_request(core, msg.from),
                     Payload::TimeoutNow => {
                         // Skip pre-vote, go directly to candidate
                         StepResult::to_candidate(Effects::none())
@@ -184,7 +183,6 @@ impl PreCandidate {
     }
 
     fn handle_prevote_request(
-        &mut self,
         core: &Core,
         from: NodeId,
         msg_term: u64,
@@ -201,20 +199,12 @@ impl PreCandidate {
             from: core.id(),
             to: from,
             term: msg_term,
-            payload: Payload::PreVoteResponse(PreVoteResponse {
-                term: core.term(),
-                granted,
-            }),
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: core.term(), granted }),
         };
         StepResult::stay(Effects::none().with_message(resp))
     }
 
-    fn handle_vote_request(
-        &mut self,
-        core: &Core,
-        from: NodeId,
-        _req: VoteRequest,
-    ) -> StepResult {
+    fn handle_vote_request(core: &Core, from: NodeId) -> StepResult {
         // We're pre-candidate, deny real votes
         let resp = Message {
             from: core.id(),
@@ -225,12 +215,11 @@ impl PreCandidate {
         StepResult::stay(Effects::none().with_message(resp))
     }
 
-    fn deny_vote(&self, core: &Core, msg: &Message) -> Effects {
+    fn deny_vote(core: &Core, msg: &Message) -> Effects {
         let payload = match &msg.payload {
-            Payload::PreVoteRequest(_) => Payload::PreVoteResponse(PreVoteResponse {
-                term: core.term(),
-                granted: false,
-            }),
+            Payload::PreVoteRequest(_) => {
+                Payload::PreVoteResponse(PreVoteResponse { term: core.term(), granted: false })
+            }
             Payload::VoteRequest(_) => Payload::VoteResponse(VoteResponse { granted: false }),
             _ => return Effects::none(),
         };
@@ -252,8 +241,8 @@ impl PreCandidate {
 mod tests {
     use super::*;
 
-    use super::super::core::Config;
     use super::super::Transition;
+    use super::super::core::Config;
 
     fn test_setup() -> (Core, PreCandidate, Effects) {
         let config = Config::new(NodeId(0)).with_election_timeout(10, 20);
@@ -311,10 +300,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 0,
-            payload: Payload::PreVoteResponse(PreVoteResponse {
-                term: 0,
-                granted: true,
-            }),
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: 0, granted: true }),
         };
 
         let StepResult { transition, .. } = precandidate.step(&mut core, Event::Message(msg));
@@ -344,10 +330,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 5, // Higher than our term 0
-            payload: Payload::PreVoteResponse(PreVoteResponse {
-                term: 5,
-                granted: false,
-            }),
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: 5, granted: false }),
         };
 
         let StepResult { transition, effects } = precandidate.step(&mut core, Event::Message(msg));
@@ -380,12 +363,7 @@ mod tests {
     fn timeout_now_skips_to_candidate() {
         let (mut core, mut precandidate, _) = test_setup();
 
-        let msg = Message {
-            from: NodeId(1),
-            to: NodeId(0),
-            term: 0,
-            payload: Payload::TimeoutNow,
-        };
+        let msg = Message { from: NodeId(1), to: NodeId(0), term: 0, payload: Payload::TimeoutNow };
 
         let StepResult { transition, .. } = precandidate.step(&mut core, Event::Message(msg));
         assert!(matches!(transition, Transition::ToCandidate));

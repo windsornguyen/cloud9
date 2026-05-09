@@ -2,11 +2,11 @@
 //!
 //! A candidate:
 //! - Increments term and votes for self on entry
-//! - Sends RequestVote to all peers
+//! - Sends `RequestVote` to all peers
 //! - Wins election with majority votes → becomes Leader
 //! - Times out → restarts election (stays Candidate)
 //! - Discovers higher term → becomes Follower
-//! - Receives AppendEntries from leader → becomes Follower
+//! - Receives `AppendEntries` from leader → becomes Follower
 //!
 //! Candidate-specific state:
 //! - `votes`: set of peers who voted for us
@@ -14,12 +14,12 @@
 
 use crate::NodeId;
 
+use super::StepResult;
 use super::core::Core;
 use super::event::{
     AppendRequest, AppendResponse, Effects, Event, Message, Payload, PreVoteRequest,
     PreVoteResponse, VoteRequest, VoteResponse,
 };
-use super::StepResult;
 
 /// Candidate role state.
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ pub struct Candidate {
 impl Candidate {
     /// Create a new candidate, starting an election.
     ///
-    /// This increments the term, votes for self, and sends RequestVote to all peers.
+    /// This increments the term, votes for self, and sends `RequestVote` to all peers.
     pub fn new(core: &mut Core) -> (Self, Effects) {
         core.start_election();
 
@@ -69,7 +69,7 @@ impl Candidate {
                 from: core.id(),
                 to: peer,
                 term: core.term(),
-                payload: Payload::VoteRequest(req.clone()),
+                payload: Payload::VoteRequest(req),
             })
             .collect();
 
@@ -86,9 +86,7 @@ impl Candidate {
     /// For joint consensus, requires majorities from both old and new configs.
     pub fn has_quorum(&self, core: &Core) -> bool {
         let config = core.effective_config();
-        config.has_quorum(|voter| {
-            self.votes.contains(&voter)
-        })
+        config.has_quorum(|voter| self.votes.contains(&voter))
     }
 
     /// Process an event. Returns transition (if any) and effects.
@@ -98,23 +96,25 @@ impl Candidate {
             // DiskWriteComplete is only relevant for leader
             Event::DiskWriteComplete(_) => StepResult::none(),
             Event::Message(msg) => {
-                if matches!(msg.payload, Payload::VoteRequest(_) | Payload::PreVoteRequest(_)) {
-                    if self.recently_heard_from_leader(core) {
-                        // Deny vote without updating term to avoid disruptive elections.
-                        return StepResult::stay(self.deny_vote(core, &msg));
-                    }
+                if matches!(msg.payload, Payload::VoteRequest(_) | Payload::PreVoteRequest(_))
+                    && self.recently_heard_from_leader(core)
+                {
+                    // Deny vote without updating term to avoid disruptive elections.
+                    return StepResult::stay(Self::deny_vote(core, &msg));
                 }
 
                 // PreVoteRequest doesn't update term (handled separately)
                 if let Payload::PreVoteRequest(req) = msg.payload {
-                    return StepResult::stay(self.handle_prevote_request(core, msg.from, msg.term, req));
+                    return StepResult::stay(Self::handle_prevote_request(
+                        core, msg.from, msg.term, req,
+                    ));
                 }
 
                 // Higher term: become follower
                 if msg.term > core.term() {
                     core.maybe_update_term(msg.term);
-                    let leader = matches!(msg.payload, Payload::AppendRequest(_))
-                        .then_some(msg.from);
+                    let leader =
+                        matches!(msg.payload, Payload::AppendRequest(_)).then_some(msg.from);
                     let mut effects = Effects::none().with_persist();
                     if matches!(msg.payload, Payload::AppendRequest(_)) {
                         effects = effects.with_message(Message {
@@ -132,15 +132,13 @@ impl Candidate {
 
                 // Stale term: reject
                 if msg.term < core.term() {
-                    return StepResult::stay(self.reject_stale(core, &msg));
+                    return StepResult::stay(Self::reject_stale(core, &msg));
                 }
 
                 match msg.payload {
                     Payload::VoteResponse(resp) => self.handle_vote_response(core, msg.from, resp),
-                    Payload::AppendRequest(req) => {
-                        self.handle_append_request(core, msg.from, req)
-                    }
-                    Payload::VoteRequest(req) => self.handle_vote_request(core, msg.from, req),
+                    Payload::AppendRequest(req) => self.handle_append_request(core, msg.from, req),
+                    Payload::VoteRequest(_) => Self::handle_vote_request(core, msg.from),
                     Payload::TimeoutNow => {
                         // Already candidate, restart election
                         StepResult::to_candidate(Effects::none())
@@ -199,12 +197,7 @@ impl Candidate {
         StepResult::to_follower(Some(from), Effects::none())
     }
 
-    fn handle_vote_request(
-        &mut self,
-        core: &Core,
-        from: NodeId,
-        _req: VoteRequest,
-    ) -> StepResult {
+    fn handle_vote_request(core: &Core, from: NodeId) -> StepResult {
         // We already voted for ourselves this term
         let resp = Message {
             from: core.id(),
@@ -220,12 +213,11 @@ impl Candidate {
         core.ticks.saturating_sub(self.last_contact_tick) < min_timeout
     }
 
-    fn deny_vote(&self, core: &Core, msg: &Message) -> Effects {
+    fn deny_vote(core: &Core, msg: &Message) -> Effects {
         let payload = match &msg.payload {
-            Payload::PreVoteRequest(_) => Payload::PreVoteResponse(PreVoteResponse {
-                term: core.term(),
-                granted: false,
-            }),
+            Payload::PreVoteRequest(_) => {
+                Payload::PreVoteResponse(PreVoteResponse { term: core.term(), granted: false })
+            }
             Payload::VoteRequest(_) => Payload::VoteResponse(VoteResponse { granted: false }),
             _ => return Effects::none(),
         };
@@ -238,7 +230,6 @@ impl Candidate {
     }
 
     fn handle_prevote_request(
-        &self,
         core: &Core,
         from: NodeId,
         msg_term: u64,
@@ -254,14 +245,11 @@ impl Candidate {
             from: core.id(),
             to: from,
             term: msg_term,
-            payload: Payload::PreVoteResponse(PreVoteResponse {
-                term: core.term(),
-                granted,
-            }),
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: core.term(), granted }),
         })
     }
 
-    fn reject_stale(&self, core: &Core, msg: &Message) -> Effects {
+    fn reject_stale(core: &Core, msg: &Message) -> Effects {
         let payload = match &msg.payload {
             Payload::VoteRequest(_) => Payload::VoteResponse(VoteResponse { granted: false }),
             Payload::AppendRequest(_) => Payload::AppendResponse(AppendResponse {
@@ -283,8 +271,8 @@ impl Candidate {
 mod tests {
     use super::*;
 
-    use super::super::core::Config;
     use super::super::Transition;
+    use super::super::core::Config;
 
     fn test_setup() -> (Core, Candidate, Effects) {
         let config = Config::new(NodeId(0)).with_prevote(false);
@@ -394,10 +382,7 @@ mod tests {
         };
 
         let StepResult { transition, .. } = candidate.step(&mut core, Event::Message(msg));
-        assert!(matches!(
-            transition,
-            Transition::ToFollower(Some(NodeId(1)))
-        ));
+        assert!(matches!(transition, Transition::ToFollower(Some(NodeId(1)))));
     }
 
     #[test]
@@ -408,10 +393,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 1,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
 
         let StepResult { transition, effects } = candidate.step(&mut core, Event::Message(msg));

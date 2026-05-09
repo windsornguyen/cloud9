@@ -1,24 +1,23 @@
-//! PreVote extension tests (Dissertation §9.4).
+//! `PreVote` extension tests (Dissertation §9.4).
+#![allow(clippy::panic)]
 //!
 //! These tests cover §9.4-specific behaviors NOT tested elsewhere:
-//! - Leader contact timeout (recently_heard_from_leader guard)
-//! - Log up-to-dateness check in PreVote responses
+//! - Leader contact timeout (`recently_heard_from_leader` guard)
+//! - Log up-to-dateness check in `PreVote` responses
 //! - Leaders deny all prevotes
-//! - next_term > voter's term requirement
+//! - `next_term` > voter's term requirement
 //!
-//! Note: Basic PreVote mechanics (term not incremented, PreCandidate transitions)
+//! Note: Basic `PreVote` mechanics (term not incremented, `PreCandidate` transitions)
 //! are tested in src/raft/precandidate.rs and src/raft/mod.rs.
 
 use cloud9_raft::raft::{
-    AppendRequest, Config, Entry, EntryPayload, Message, Payload, PreVoteRequest,
-    PreVoteResponse, RaftNode, VoteResponse,
+    AppendRequest, Config, Entry, EntryPayload, Message, Payload, PreVoteRequest, PreVoteResponse,
+    RaftNode, VoteResponse,
 };
 use cloud9_raft::{Command, NodeId};
 
 fn prevote_config(id: NodeId) -> Config {
-    Config::new(id)
-        .with_election_timeout(10, 20)
-        .with_heartbeat_interval(3)
+    Config::new(id).with_election_timeout(10, 20).with_heartbeat_interval(3)
 }
 
 const THREE_VOTERS: &[NodeId] = &[NodeId(0), NodeId(1), NodeId(2)];
@@ -31,7 +30,7 @@ const THREE_VOTERS: &[NodeId] = &[NodeId(0), NodeId(1), NodeId(2)];
 /// a baseline election timeout"
 ///
 /// A follower that recently received a heartbeat from the leader should deny
-/// PreVote requests, preventing disruption from partitioned/slow servers.
+/// `PreVote` requests, preventing disruption from partitioned/slow servers.
 #[test]
 fn follower_denies_prevote_if_recently_heard_from_leader() {
     let config = prevote_config(NodeId(0));
@@ -70,16 +69,13 @@ fn follower_denies_prevote_if_recently_heard_from_leader() {
     // Should respond with denial
     assert_eq!(effects.messages.len(), 1);
     if let Payload::PreVoteResponse(resp) = &effects.messages[0].payload {
-        assert!(
-            !resp.granted,
-            "should deny PreVote when recently heard from leader"
-        );
+        assert!(!resp.granted, "should deny PreVote when recently heard from leader");
     } else {
         panic!("expected PreVoteResponse");
     }
 }
 
-/// After enough time passes without leader contact, follower should grant PreVote.
+/// After enough time passes without leader contact, follower should grant `PreVote`.
 #[test]
 fn follower_grants_prevote_after_leader_timeout() {
     let config = prevote_config(NodeId(0));
@@ -120,10 +116,7 @@ fn follower_grants_prevote_after_leader_timeout() {
 
     assert_eq!(effects.messages.len(), 1);
     if let Payload::PreVoteResponse(resp) = &effects.messages[0].payload {
-        assert!(
-            resp.granted,
-            "should grant PreVote after leader contact timeout"
-        );
+        assert!(resp.granted, "should grant PreVote after leader contact timeout");
     } else {
         panic!("expected PreVoteResponse");
     }
@@ -133,19 +126,16 @@ fn follower_grants_prevote_after_leader_timeout() {
 // §9.4: PreVote respects log up-to-dateness (election restriction)
 // =============================================================================
 
-/// PreVote should be denied if the candidate's log is not up-to-date.
-/// This is the same check as regular VoteRequest.
+/// `PreVote` should be denied if the candidate's log is not up-to-date.
+/// This is the same check as regular `VoteRequest`.
 #[test]
 fn prevote_denied_if_log_not_up_to_date() {
     let config = prevote_config(NodeId(0));
     let mut node = RaftNode::new(config, THREE_VOTERS);
 
     // Receive entries to make our log non-empty
-    let entries = vec![Entry {
-        term: 1,
-        index: 1,
-        payload: EntryPayload::Command(Command(vec![1])),
-    }];
+    let entries =
+        vec![Entry { term: 1, index: 1, payload: EntryPayload::Command(Command(vec![1])) }];
     let append = Message {
         from: NodeId(1),
         to: NodeId(0),
@@ -179,27 +169,21 @@ fn prevote_denied_if_log_not_up_to_date() {
 
     assert_eq!(effects.messages.len(), 1);
     if let Payload::PreVoteResponse(resp) = &effects.messages[0].payload {
-        assert!(
-            !resp.granted,
-            "should deny PreVote when candidate's log is not up-to-date"
-        );
+        assert!(!resp.granted, "should deny PreVote when candidate's log is not up-to-date");
     } else {
         panic!("expected PreVoteResponse");
     }
 }
 
-/// PreVote granted when candidate's log is at least as up-to-date.
+/// `PreVote` granted when candidate's log is at least as up-to-date.
 #[test]
 fn prevote_granted_if_log_up_to_date() {
     let config = prevote_config(NodeId(0));
     let mut node = RaftNode::new(config, THREE_VOTERS);
 
     // Receive one entry
-    let entries = vec![Entry {
-        term: 1,
-        index: 1,
-        payload: EntryPayload::Command(Command(vec![1])),
-    }];
+    let entries =
+        vec![Entry { term: 1, index: 1, payload: EntryPayload::Command(Command(vec![1])) }];
     let append = Message {
         from: NodeId(1),
         to: NodeId(0),
@@ -243,7 +227,7 @@ fn prevote_granted_if_log_up_to_date() {
 // §9.4: Leaders deny all PreVotes
 // =============================================================================
 
-/// A leader should deny all PreVote requests - it's a valid leader.
+/// A leader should deny all `PreVote` requests - it's a valid leader.
 #[test]
 fn leader_denies_all_prevotes() {
     let config = prevote_config(NodeId(0));
@@ -258,10 +242,7 @@ fn leader_denies_all_prevotes() {
         from: NodeId(1),
         to: NodeId(0),
         term: 0,
-        payload: Payload::PreVoteResponse(PreVoteResponse {
-            term: 0,
-            granted: true,
-        }),
+        payload: Payload::PreVoteResponse(PreVoteResponse { term: 0, granted: true }),
     });
     assert!(node.is_candidate());
 
@@ -305,7 +286,7 @@ fn leader_denies_all_prevotes() {
 // §9.4: PreVote term requirements
 // =============================================================================
 
-/// PreVote next_term must be greater than voter's term.
+/// `PreVote` `next_term` must be greater than voter's term.
 #[test]
 fn prevote_requires_higher_next_term() {
     let config = prevote_config(NodeId(0));
@@ -346,10 +327,7 @@ fn prevote_requires_higher_next_term() {
 
     assert_eq!(effects.messages.len(), 1);
     if let Payload::PreVoteResponse(resp) = &effects.messages[0].payload {
-        assert!(
-            !resp.granted,
-            "should deny PreVote when next_term is not greater than our term"
-        );
+        assert!(!resp.granted, "should deny PreVote when next_term is not greater than our term");
     } else {
         panic!("expected PreVoteResponse");
     }
