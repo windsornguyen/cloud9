@@ -5,8 +5,8 @@
 
 use std::future::Future;
 
-use cloud9_raft::raft::Message;
 use cloud9_raft::NodeId;
+use cloud9_raft::raft::Message;
 use thiserror::Error;
 
 /// Errors from transport operations.
@@ -58,7 +58,10 @@ pub trait Transport: Send + Sync {
     ///
     /// Called when configuration changes. The transport should establish
     /// connections to new nodes and may close connections to removed nodes.
-    fn update_peers(&self, peers: &[NodeId]) -> impl Future<Output = Result<(), TransportError>> + Send;
+    fn update_peers(
+        &self,
+        peers: &[NodeId],
+    ) -> impl Future<Output = Result<(), TransportError>> + Send;
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 //! I/O layer for cloud9-raft.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 //!
 //! This crate provides the integration between the pure Raft state machine
 //! (`cloud9-raft`) and the outside world. It defines traits for:
@@ -24,6 +25,8 @@ mod storage;
 mod transport;
 
 pub use read_index::{ReadId, ReadIndexCoordinator, ReadIndexError, ReadIndexResult};
-pub use session::{ClientId, ClientSession, DuplicateCheck, SequenceNum, SessionRequest, SessionTracker};
+pub use session::{
+    ClientId, ClientSession, DuplicateCheck, SequenceNum, SessionRequest, SessionTracker,
+};
 pub use storage::{SnapshotData, Storage, StorageError};
 pub use transport::{Transport, TransportError};

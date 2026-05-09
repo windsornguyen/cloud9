@@ -21,7 +21,7 @@
 //! - `Candidate` - runs elections, wins to Leader
 //! - `Leader` - replicates log, sends heartbeats
 //!
-//! All roles share `Core` (term, voted_for, log, commit_index, config).
+//! All roles share `Core` (term, `voted_for`, log, `commit_index`, config).
 //!
 //! # Timing (§3.9, Chapter 9)
 //!
@@ -92,7 +92,7 @@ pub use precandidate::PreCandidate;
 use crate::{Command, CommittedEntry, LogIndex, NodeId, ProposeError, TransferError};
 
 /// Role transition result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transition {
     Stay,
     ToFollower(Option<NodeId>),
@@ -177,20 +177,14 @@ impl RaftNode {
     pub fn new(config: Config, voters: &[NodeId]) -> Self {
         let mut core = Core::new(config, voters);
         let follower = Follower::new(&mut core, None);
-        Self {
-            core,
-            role: RoleState::Follower(follower),
-        }
+        Self { core, role: RoleState::Follower(follower) }
     }
 
     /// Restore a node from persisted state.
     pub fn restore(config: Config, persistent: Persistent) -> Self {
         let mut core = Core::restore(config, persistent);
         let follower = Follower::new(&mut core, None);
-        Self {
-            core,
-            role: RoleState::Follower(follower),
-        }
+        Self { core, role: RoleState::Follower(follower) }
     }
 
     /// This node's ID.
@@ -223,7 +217,7 @@ impl RaftNode {
         self.role.is_candidate()
     }
 
-    /// Whether this node is a pre-candidate (PreVote phase).
+    /// Whether this node is a pre-candidate (`PreVote` phase).
     #[inline]
     pub fn is_precandidate(&self) -> bool {
         self.role.is_precandidate()
@@ -298,9 +292,7 @@ impl RaftNode {
 
                 Ok((index, effects))
             }
-            _ => Err(ProposeError::NotLeader {
-                leader_hint: self.leader(),
-            }),
+            _ => Err(ProposeError::NotLeader { leader_hint: self.leader() }),
         }
     }
 
@@ -309,7 +301,7 @@ impl RaftNode {
     /// Per §4, the new configuration takes effect immediately when appended.
     pub fn propose_config_change(
         &mut self,
-        change: ConfigChange,
+        change: &ConfigChange,
     ) -> Result<(LogIndex, Effects), ConfigChangeError> {
         match &mut self.role {
             RoleState::Leader(leader) => {
@@ -330,16 +322,13 @@ impl RaftNode {
 
     /// Transfer leadership to the target node (§3.11).
     ///
-    /// Sends TimeoutNow to the target, causing it to start an election immediately.
+    /// Sends `TimeoutNow` to the target, causing it to start an election immediately.
     /// The target must be a voter and fully caught up with the leader's log.
     ///
     /// After calling this, the leader should stop accepting new proposals and
     /// wait for the target to win the election. Once the leader sees a higher
     /// term (from the target's election), it will step down automatically.
-    pub fn transfer_leadership(
-        &self,
-        target: NodeId,
-    ) -> Result<Effects, TransferError> {
+    pub fn transfer_leadership(&self, target: NodeId) -> Result<Effects, TransferError> {
         match &self.role {
             RoleState::Leader(leader) => leader.transfer_leadership(&self.core, target),
             _ => Err(TransferError::NotLeader),
@@ -355,15 +344,13 @@ impl RaftNode {
         let start = self.core.last_applied + 1;
         let end = self.core.commit_index + 1;
         (start..end).filter_map(|idx| {
-            self.core.log().get(idx).and_then(|entry| {
-                match &entry.payload {
-                    EntryPayload::Command(cmd) => Some(CommittedEntry {
-                        index: entry.index,
-                        term: entry.term,
-                        command: cmd.clone(),
-                    }),
-                    EntryPayload::Config(_) => None,
-                }
+            self.core.log().get(idx).and_then(|entry| match &entry.payload {
+                EntryPayload::Command(cmd) => Some(CommittedEntry {
+                    index: entry.index,
+                    term: entry.term,
+                    command: cmd.clone(),
+                }),
+                EntryPayload::Config(_) => None,
             })
         })
     }
@@ -445,7 +432,7 @@ mod tests {
     const THREE_VOTERS: &[NodeId] = &[NodeId(0), NodeId(1), NodeId(2)];
 
     /// Create a config with prevote disabled for existing tests.
-    /// New PreVote-specific tests should use Config::new() which has prevote enabled.
+    /// New PreVote-specific tests should use `Config::new()` which has prevote enabled.
     fn test_config(id: NodeId) -> Config {
         Config::new(id)
             .with_prevote(false)
@@ -617,7 +604,7 @@ mod tests {
         }
     }
 
-    /// §3.10: TimeoutNow triggers immediate election
+    /// §3.10: `TimeoutNow` triggers immediate election
     #[test]
     fn timeout_now() {
         let mut node = three_node_cluster();
@@ -715,7 +702,7 @@ mod tests {
 
         // Add a new voter
         // Step 1: add learner
-        let res = node.propose_config_change(ConfigChange::AddLearner(NodeId(1))).unwrap();
+        let res = node.propose_config_change(&ConfigChange::AddLearner(NodeId(1))).unwrap();
         // Simulate learner catching up by acknowledging the config entry
         let ack = Message {
             from: NodeId(1),
@@ -729,7 +716,7 @@ mod tests {
         node.step(ack);
 
         // Step 2: promote to voter (requires learner to be caught up)
-        let result = node.propose_config_change(ConfigChange::AddVoter(NodeId(1)));
+        let result = node.propose_config_change(&ConfigChange::AddVoter(NodeId(1)));
         assert!(result.is_ok());
 
         let (index, effects) = result.unwrap();
@@ -760,7 +747,7 @@ mod tests {
         assert!(node.is_leader());
 
         // Remove a voter
-        let result = node.propose_config_change(ConfigChange::RemoveVoter(NodeId(2)));
+        let result = node.propose_config_change(&ConfigChange::RemoveVoter(NodeId(2)));
         assert!(result.is_ok());
 
         // Removed voter should not be in the cluster
@@ -781,12 +768,12 @@ mod tests {
 
         // Start a config change (creates joint config in JointConsensus mode)
         let members = Members::new([NodeId(0), NodeId(1)], []).unwrap();
-        let result = node.propose_config_change(ConfigChange::SetMembers(members));
+        let result = node.propose_config_change(&ConfigChange::SetMembers(members));
         assert!(result.is_ok());
 
         // Second change should fail while first is pending
         let members = Members::new([NodeId(0), NodeId(2)], []).unwrap();
-        let result = node.propose_config_change(ConfigChange::SetMembers(members));
+        let result = node.propose_config_change(&ConfigChange::SetMembers(members));
         assert!(matches!(result, Err(ConfigChangeError::ChangeInProgress)));
     }
 
@@ -810,7 +797,7 @@ mod tests {
         assert!(node.is_leader());
 
         // Remove self from config - new config is [1, 2]
-        let _ = node.propose_config_change(ConfigChange::RemoveVoter(NodeId(0)));
+        let _ = node.propose_config_change(&ConfigChange::RemoveVoter(NodeId(0)));
         let config_index = node.core.log().last_index();
 
         // After removing self, quorum is calculated with new config [1, 2]
@@ -867,7 +854,7 @@ mod tests {
 
         // Change to a completely different set of voters (joint consensus)
         let members = Members::new([NodeId(0), NodeId(3), NodeId(4)], []).unwrap();
-        let result = node.propose_config_change(ConfigChange::SetMembers(members));
+        let result = node.propose_config_change(&ConfigChange::SetMembers(members));
         assert!(result.is_ok());
 
         // The config should now be Joint
@@ -895,7 +882,7 @@ mod tests {
         assert!(node.commit_index() < config_index);
     }
 
-    /// §4.3: Joint consensus auto-completes to C_new
+    /// §4.3: Joint consensus auto-completes to `C_new`
     #[test]
     fn joint_consensus_auto_completes() {
         let mut config = test_config(NodeId(0));
@@ -918,7 +905,7 @@ mod tests {
         // Change config to remove NodeId(2): [0,1,2] → [0,1]
         // Creates Joint{[0,1,2], [0,1]}
         let members = Members::new([NodeId(0), NodeId(1)], []).unwrap();
-        let result = node.propose_config_change(ConfigChange::SetMembers(members));
+        let result = node.propose_config_change(&ConfigChange::SetMembers(members));
         assert!(result.is_ok());
         assert!(node.core.effective_config().is_joint());
 
@@ -1009,8 +996,7 @@ mod tests {
         assert_eq!(candidate.votes.len(), 2);
 
         // Reset to pre-win state for duplicate test
-        let config = test_config(NodeId(0))
-            .with_election_timeout(10, 20);
+        let config = test_config(NodeId(0)).with_election_timeout(10, 20);
         let mut core = Core::new(config, &[NodeId(0), NodeId(1), NodeId(2), NodeId(3), NodeId(4)]);
         let (mut candidate, _) = Candidate::new(&mut core);
 
@@ -1034,7 +1020,10 @@ mod tests {
         let result = candidate.step(&mut core, Event::Message(vote_dup));
 
         // No state change, no effects
-        assert!(matches!(result.transition, Transition::Stay), "duplicate vote should not cause transition");
+        assert!(
+            matches!(result.transition, Transition::Stay),
+            "duplicate vote should not cause transition"
+        );
         assert_eq!(candidate.votes.len(), 2, "vote count unchanged");
         assert!(result.effects.messages.is_empty(), "no messages from duplicate vote");
         assert!(!result.effects.persist, "no persist from duplicate vote");
@@ -1079,10 +1068,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: core.term(),
-            payload: Payload::AppendResponse(AppendResponse {
-                success: true,
-                last_log_index: 2,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: true, last_log_index: 2 }),
         };
         leader.step(&mut core, Event::Message(ack));
 
@@ -1095,14 +1081,16 @@ mod tests {
         // Heartbeat to follower should have empty entries (they're caught up)
         for msg in &result.effects.messages {
             if let Payload::AppendRequest(req) = &msg.payload {
-                assert!(req.entries.is_empty(),
+                assert!(
+                    req.entries.is_empty(),
                     "up-to-date follower should receive empty heartbeat, got {} entries",
-                    req.entries.len());
+                    req.entries.len()
+                );
             }
         }
     }
 
-    /// Rejection hint is used to efficiently adjust next_index.
+    /// Rejection hint is used to efficiently adjust `next_index`.
     #[test]
     fn rejection_uses_hint_efficiently() {
         // Test at role level with pre-populated log
@@ -1122,7 +1110,7 @@ mod tests {
         let (mut leader, _) = Leader::new(&mut core);
 
         // Leader initializes next_index to last_log_index + 1 = 11
-        let next_before = *leader.next_index.get(&NodeId(1)).unwrap();
+        let next_before = leader.next_index[&NodeId(1)];
         assert_eq!(next_before, 11, "initial next_index should be last_log_index + 1");
 
         // Follower rejects with hint that it only has index 3
@@ -1138,7 +1126,7 @@ mod tests {
         leader.step(&mut core, Event::Message(rejection));
 
         // next_index should jump to hint+1 = 4, not decrement by 1 from 11
-        let next_after = *leader.next_index.get(&NodeId(1)).unwrap();
+        let next_after = leader.next_index[&NodeId(1)];
         assert_eq!(next_after, 4, "should use hint efficiently: jump to hint+1");
     }
 
@@ -1243,11 +1231,7 @@ mod tests {
         let config = test_config(NodeId(0));
         let mut node = RaftNode::new(config, &[NodeId(0), NodeId(1), NodeId(2)]);
 
-        let entry = Entry {
-            term: 1,
-            index: 1,
-            payload: EntryPayload::Command(Command(vec![42])),
-        };
+        let entry = Entry { term: 1, index: 1, payload: EntryPayload::Command(Command(vec![42])) };
 
         // First append
         let append1 = Message {
@@ -1313,10 +1297,7 @@ mod tests {
             from: NodeId(2),
             to: NodeId(0),
             term: 2,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
         let effects = node.step(vote_req);
 
@@ -1410,7 +1391,7 @@ mod tests {
             to: NodeId(0),
             term: 5,
             payload: Payload::VoteRequest(VoteRequest {
-                last_log_term: 3,  // Older term
+                last_log_term: 3,   // Older term
                 last_log_index: 10, // Even with longer log
             }),
         };
@@ -1456,10 +1437,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 2,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_term: 1,
-                last_log_index: 1,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_term: 1, last_log_index: 1 }),
         };
         let result = follower.step(&mut core, Event::Message(good_candidate));
 
@@ -1496,10 +1474,7 @@ mod tests {
             from: NodeId(2),
             to: NodeId(0),
             term: 2,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
         let result = candidate.step(&mut core, Event::Message(vote_req));
 
@@ -1545,10 +1520,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: core.term(),
-            payload: Payload::AppendResponse(AppendResponse {
-                success: true,
-                last_log_index: 1,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: true, last_log_index: 1 }),
         };
         leader.step(&mut core, Event::Message(ack));
 
@@ -1561,10 +1533,7 @@ mod tests {
         // Heartbeat should have no entries (follower is caught up)
         for msg in &result.effects.messages {
             if let Payload::AppendRequest(req) = &msg.payload {
-                assert!(
-                    req.entries.is_empty(),
-                    "should not re-send already-acked entries"
-                );
+                assert!(req.entries.is_empty(), "should not re-send already-acked entries");
             }
         }
     }
@@ -1592,15 +1561,12 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 1,
-            payload: Payload::AppendResponse(AppendResponse {
-                success: false,
-                last_log_index: 10,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: false, last_log_index: 10 }),
         };
         leader.step(&mut core, Event::Message(rejection));
 
         // next_index should jump to 11, not 100 (one-by-one would be wasteful)
-        let next = *leader.next_index.get(&NodeId(1)).unwrap();
+        let next = leader.next_index[&NodeId(1)];
         assert_eq!(next, 11, "should use hint to jump, not decrement one-by-one");
     }
 
@@ -1630,10 +1596,7 @@ mod tests {
             from: NodeId(2),
             to: NodeId(0),
             term: 100, // Much higher term
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
         node.step(disruptive);
 
@@ -1657,10 +1620,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: core.term(),
-            payload: Payload::AppendResponse(AppendResponse {
-                success: true,
-                last_log_index: 0,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: true, last_log_index: 0 }),
         };
         let result = leader.step(&mut core, Event::Message(ack));
         assert!(!result.effects.persist, "ack updates volatile state only");
@@ -1684,10 +1644,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 1,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
         follower.step(&mut core, Event::Message(vote_req));
 
@@ -1772,7 +1729,7 @@ mod tests {
         }
 
         // Should have had ~10 heartbeats (100 ticks / 10 interval)
-        assert!(heartbeat_count >= 9 && heartbeat_count <= 11);
+        assert!((9..=11).contains(&heartbeat_count));
 
         // Each heartbeat should send exactly 3 messages (one per peer)
         let expected = heartbeat_count * 3;
@@ -1826,7 +1783,7 @@ mod tests {
 
         // Start joint config: old=[0,1,2], new=[0,3,4]
         let members = Members::new([NodeId(0), NodeId(3), NodeId(4)], []).unwrap();
-        node.propose_config_change(ConfigChange::SetMembers(members)).unwrap();
+        node.propose_config_change(&ConfigChange::SetMembers(members)).unwrap();
         let config_index = node.core.log().last_index();
 
         // Ack from old config member only
@@ -1860,15 +1817,12 @@ mod tests {
         node.step(new_ack);
 
         // Now should be committed (have 2/3 from old, 2/3 from new)
-        assert!(
-            node.commit_index() >= config_index,
-            "should commit once both majorities achieved"
-        );
+        assert!(node.commit_index() >= config_index, "should commit once both majorities achieved");
     }
 
     // --- Leadership Transfer Tests (§3.11) --------------------------------------
 
-    /// §3.11: Leadership transfer sends TimeoutNow to caught-up target.
+    /// §3.11: Leadership transfer sends `TimeoutNow` to caught-up target.
     #[test]
     fn leadership_transfer_to_caught_up_peer() {
         let config = test_config(NodeId(0));
@@ -1892,10 +1846,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: node.term(),
-            payload: Payload::AppendResponse(AppendResponse {
-                success: true,
-                last_log_index: 0,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: true, last_log_index: 0 }),
         };
         node.step(ack);
 
@@ -1998,7 +1949,7 @@ mod tests {
         assert!(matches!(result, Err(TransferError::NotLeader)));
     }
 
-    /// §3.11: Full transfer flow - target receives TimeoutNow and wins election.
+    /// §3.11: Full transfer flow - target receives `TimeoutNow` and wins election.
     #[test]
     fn leadership_transfer_full_flow() {
         let config0 = test_config(NodeId(0));
@@ -2027,10 +1978,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: leader_term,
-            payload: Payload::AppendResponse(AppendResponse {
-                success: true,
-                last_log_index: 0,
-            }),
+            payload: Payload::AppendResponse(AppendResponse { success: true, last_log_index: 0 }),
         };
         node0.step(ack);
 
@@ -2078,7 +2026,7 @@ mod tests {
 
     // --- PreVote tests (§4.2.3) ------------------------------------------------
 
-    /// §4.2.3: With PreVote enabled, follower transitions to PreCandidate on timeout.
+    /// §4.2.3: With `PreVote` enabled, follower transitions to `PreCandidate` on timeout.
     #[test]
     fn prevote_follower_becomes_precandidate() {
         // Use prevote-enabled config
@@ -2095,7 +2043,7 @@ mod tests {
         assert_eq!(node.term(), 0); // Term NOT incremented yet
     }
 
-    /// §4.2.3: PreCandidate sends PreVoteRequest, not VoteRequest.
+    /// §4.2.3: `PreCandidate` sends `PreVoteRequest`, not `VoteRequest`.
     #[test]
     fn prevote_sends_prevote_requests() {
         let config = Config::new(NodeId(0));
@@ -2117,7 +2065,7 @@ mod tests {
         }
     }
 
-    /// §4.2.3: PreCandidate proceeds to real Candidate after majority pre-votes.
+    /// §4.2.3: `PreCandidate` proceeds to real Candidate after majority pre-votes.
     #[test]
     fn prevote_proceeds_to_candidate_on_majority() {
         let config = Config::new(NodeId(0));
@@ -2134,10 +2082,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 0,
-            payload: Payload::PreVoteResponse(PreVoteResponse {
-                term: 0,
-                granted: true,
-            }),
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: 0, granted: true }),
         };
         node.step(prevote);
 
@@ -2146,7 +2091,7 @@ mod tests {
         assert_eq!(node.term(), 1);
     }
 
-    /// §4.2.3: PreVote doesn't disrupt cluster - partitioned node can't increment term.
+    /// §4.2.3: `PreVote` doesn't disrupt cluster - partitioned node can't increment term.
     #[test]
     fn prevote_prevents_term_disruption() {
         let config = Config::new(NodeId(0));
@@ -2172,7 +2117,7 @@ mod tests {
         assert_eq!(node.term(), 0);
     }
 
-    /// §4.2.3: Full PreVote → Vote → Leader flow.
+    /// §4.2.3: Full `PreVote` → Vote → Leader flow.
     #[test]
     fn prevote_full_election_flow() {
         let config = Config::new(NodeId(0));
@@ -2189,10 +2134,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 0,
-            payload: Payload::PreVoteResponse(PreVoteResponse {
-                term: 0,
-                granted: true,
-            }),
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: 0, granted: true }),
         };
         node.step(prevote);
         assert!(node.role.is_candidate());
@@ -2209,7 +2151,7 @@ mod tests {
         assert!(node.is_leader());
     }
 
-    /// §4.2.3: PreCandidate steps down on AppendEntries from leader.
+    /// §4.2.3: `PreCandidate` steps down on `AppendEntries` from leader.
     #[test]
     fn prevote_steps_down_on_leader_contact() {
         let config = Config::new(NodeId(0));
@@ -2275,7 +2217,7 @@ mod tests {
         }
 
         // Add node 3 as learner then voter (to have someone to transfer to)
-        let _ = node.propose_config_change(ConfigChange::AddLearner(NodeId(3)));
+        let _ = node.propose_config_change(&ConfigChange::AddLearner(NodeId(3)));
 
         // Get node 3 caught up
         node.step(Message {
@@ -2288,7 +2230,7 @@ mod tests {
             }),
         });
 
-        let _ = node.propose_config_change(ConfigChange::AddVoter(NodeId(3)));
+        let _ = node.propose_config_change(&ConfigChange::AddVoter(NodeId(3)));
 
         // Update everyone's match index again
         for peer in [NodeId(1), NodeId(2), NodeId(3)] {
@@ -2304,7 +2246,7 @@ mod tests {
         }
 
         // Now remove ourselves (node 0)
-        let result = node.propose_config_change(ConfigChange::RemoveVoter(NodeId(0)));
+        let result = node.propose_config_change(&ConfigChange::RemoveVoter(NodeId(0)));
 
         // The config change should succeed
         let (_, _effects) = result.expect("config change should succeed");

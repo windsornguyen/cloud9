@@ -7,7 +7,7 @@
 //!
 //! The solution is to track client sessions:
 //! 1. Clients register and receive unique IDs
-//! 2. Each request carries (client_id, sequence_number)
+//! 2. Each request carries (`client_id`, `sequence_number`)
 //! 3. The state machine tracks the last completed sequence per client
 //! 4. Duplicate requests return cached responses
 //!
@@ -95,10 +95,7 @@ pub struct ClientSession<R> {
 
 impl<R> Default for ClientSession<R> {
     fn default() -> Self {
-        Self {
-            last_sequence: 0,
-            last_response: None,
-        }
+        Self { last_sequence: 0, last_response: None }
     }
 }
 
@@ -138,10 +135,7 @@ pub struct SessionTracker<R> {
 impl<R: Clone> SessionTracker<R> {
     /// Create a new session tracker.
     pub fn new() -> Self {
-        Self {
-            sessions: BTreeMap::new(),
-            next_client_id: 1,
-        }
+        Self { sessions: BTreeMap::new(), next_client_id: 1 }
     }
 
     /// Register a new client session.
@@ -185,12 +179,7 @@ impl<R: Clone> SessionTracker<R> {
     ///
     /// Call this after executing a command. Caches the response for
     /// duplicate detection.
-    pub fn record_completion(
-        &mut self,
-        client_id: ClientId,
-        sequence: SequenceNum,
-        response: R,
-    ) {
+    pub fn record_completion(&mut self, client_id: ClientId, sequence: SequenceNum, response: R) {
         let session = self.sessions.entry(client_id).or_default();
         if sequence > session.last_sequence {
             session.last_sequence = sequence;
@@ -244,10 +233,7 @@ mod tests {
         let mut tracker: SessionTracker<String> = SessionTracker::new();
         let client = tracker.register_client();
 
-        assert!(matches!(
-            tracker.check_duplicate(client, 1),
-            DuplicateCheck::New
-        ));
+        assert!(matches!(tracker.check_duplicate(client, 1), DuplicateCheck::New));
     }
 
     #[test]
@@ -274,10 +260,7 @@ mod tests {
         tracker.record_completion(client, 5, "response5".to_string());
 
         // Sequence 3 is stale
-        assert!(matches!(
-            tracker.check_duplicate(client, 3),
-            DuplicateCheck::Stale
-        ));
+        assert!(matches!(tracker.check_duplicate(client, 3), DuplicateCheck::Stale));
     }
 
     #[test]
@@ -288,10 +271,7 @@ mod tests {
         tracker.record_completion(client, 1, "response1".to_string());
 
         // Sequence 2 is new
-        assert!(matches!(
-            tracker.check_duplicate(client, 2),
-            DuplicateCheck::New
-        ));
+        assert!(matches!(tracker.check_duplicate(client, 2), DuplicateCheck::New));
     }
 
     #[test]
@@ -309,10 +289,7 @@ mod tests {
         let tracker: SessionTracker<String> = SessionTracker::new();
         let unknown = ClientId(999);
 
-        assert!(matches!(
-            tracker.check_duplicate(unknown, 1),
-            DuplicateCheck::New
-        ));
+        assert!(matches!(tracker.check_duplicate(unknown, 1), DuplicateCheck::New));
     }
 
     #[test]

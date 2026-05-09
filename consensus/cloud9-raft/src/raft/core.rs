@@ -1,7 +1,7 @@
 //! Core shared state for all Raft roles.
 //!
 //! The Core holds the "mathematical" Raft state that all invariants
-//! are predicates over: term, voted_for, log, commit_index, config.
+//! are predicates over: term, `voted_for`, log, `commit_index`, config.
 //!
 //! Safety properties (term monotonicity, log matching, leader completeness,
 //! state machine safety) are all about Core, independent of role.
@@ -45,11 +45,11 @@ pub struct Config {
     /// Per Chapter 9 benchmark: "heartbeat interval... was half of the
     /// minimum election timeout"
     pub heartbeat_interval: u64,
-    /// Max entries per AppendEntries message.
+    /// Max entries per `AppendEntries` message.
     pub max_entries_per_msg: u64,
     /// How to handle membership changes.
     pub membership_mode: MembershipMode,
-    /// Enable PreVote protocol (§4.2.3).
+    /// Enable `PreVote` protocol (§4.2.3).
     ///
     /// When enabled, nodes send a "pre-vote" request before starting a real
     /// election. This prevents partitioned nodes from incrementing their term
@@ -57,7 +57,7 @@ pub struct Config {
     pub prevote: bool,
     /// Enable parallel disk write optimization (§10.2.1).
     ///
-    /// When enabled, the leader can send AppendEntries to followers while its
+    /// When enabled, the leader can send `AppendEntries` to followers while its
     /// own disk write is in progress. The IO layer should signal completion
     /// via `Event::DiskWriteComplete`. This removes a disk write from the
     /// critical path, reducing latency.
@@ -68,7 +68,7 @@ pub struct Config {
     /// Enable pipelining optimization (§10.2.2).
     ///
     /// When enabled, the leader updates `next_index` optimistically after
-    /// sending AppendEntries, rather than waiting for acknowledgment. This
+    /// sending `AppendEntries`, rather than waiting for acknowledgment. This
     /// allows multiple in-flight requests per follower, improving throughput.
     ///
     /// On timeout or rejection, `next_index` is reverted to `match_index + 1`.
@@ -81,7 +81,7 @@ impl Config {
     /// Assumes 1 tick = 1ms. Values from Ongaro's dissertation:
     /// - Election timeout: 150–300ms (Chapter 9)
     /// - Heartbeat interval: 75ms (half of min election timeout, Chapter 9)
-    /// - PreVote: enabled by default (§4.2.3)
+    /// - `PreVote`: enabled by default (§4.2.3)
     /// - Parallel disk write: enabled by default (§10.2.1)
     /// - Pipelining: enabled by default (§10.2.2)
     pub fn new(id: NodeId) -> Self {
@@ -98,36 +98,42 @@ impl Config {
     }
 
     /// Set the membership mode.
+    #[must_use]
     pub fn with_membership_mode(mut self, mode: MembershipMode) -> Self {
         self.membership_mode = mode;
         self
     }
 
     /// Set election timeout range.
+    #[must_use]
     pub fn with_election_timeout(mut self, min: u64, max: u64) -> Self {
         self.election_timeout = (min, max);
         self
     }
 
     /// Set heartbeat interval.
+    #[must_use]
     pub fn with_heartbeat_interval(mut self, interval: u64) -> Self {
         self.heartbeat_interval = interval;
         self
     }
 
-    /// Enable or disable PreVote (§4.2.3).
+    /// Enable or disable `PreVote` (§4.2.3).
+    #[must_use]
     pub fn with_prevote(mut self, enabled: bool) -> Self {
         self.prevote = enabled;
         self
     }
 
     /// Enable or disable parallel disk write optimization (§10.2.1).
+    #[must_use]
     pub fn with_parallel_disk_write(mut self, enabled: bool) -> Self {
         self.parallel_disk_write = enabled;
         self
     }
 
     /// Enable or disable pipelining optimization (§10.2.2).
+    #[must_use]
     pub fn with_pipelining(mut self, enabled: bool) -> Self {
         self.pipelining = enabled;
         self
@@ -146,7 +152,7 @@ impl Default for Config {
 ///
 /// From §3.8: "currentTerm, votedFor, and log[] must be persisted."
 /// Additionally, we persist the bootstrap configuration for recovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Persistent {
     pub term: Term,
     pub voted_for: Option<NodeId>,
@@ -156,25 +162,14 @@ pub struct Persistent {
     pub bootstrap_config: Configuration,
 }
 
-impl Default for Persistent {
-    fn default() -> Self {
-        Self {
-            term: 0,
-            voted_for: None,
-            log: Log::default(),
-            bootstrap_config: Configuration::default(),
-        }
-    }
-}
-
 /// The shared core state for all Raft roles.
 ///
 /// This struct holds everything that:
-/// 1. Must be persisted (term, voted_for, log, bootstrap_config)
-/// 2. Is shared across all roles (commit_index, config)
+/// 1. Must be persisted (term, `voted_for`, log, `bootstrap_config`)
+/// 2. Is shared across all roles (`commit_index`, config)
 /// 3. Tracks logical time (ticks, rng)
 ///
-/// Role-specific state (leader_id, votes, next_index, match_index)
+/// Role-specific state (`leader_id`, votes, `next_index`, `match_index`)
 /// lives in the role structs.
 pub struct Core {
     // Identity and configuration
@@ -197,31 +192,16 @@ impl Core {
     ///
     /// The `voters` slice is the initial cluster membership (bootstrap config).
     pub fn new(config: Config, voters: &[NodeId]) -> Self {
-        let rng = config.id.0.wrapping_mul(0x5DEE_CE66_D).wrapping_add(0xB);
+        let rng = config.id.0.wrapping_mul(0x0005_DEEC_E66D).wrapping_add(0xB);
         let bootstrap = Configuration::simple(voters.to_vec());
-        let mut persistent = Persistent::default();
-        persistent.bootstrap_config = bootstrap;
-        Self {
-            config,
-            persistent,
-            commit_index: 0,
-            last_applied: 0,
-            ticks: 0,
-            rng,
-        }
+        let persistent = Persistent { bootstrap_config: bootstrap, ..Persistent::default() };
+        Self { config, persistent, commit_index: 0, last_applied: 0, ticks: 0, rng }
     }
 
     /// Restore from persisted state.
     pub fn restore(config: Config, persistent: Persistent) -> Self {
-        let rng = config.id.0.wrapping_mul(0x5DEE_CE66_D).wrapping_add(0xB);
-        Self {
-            config,
-            persistent,
-            commit_index: 0,
-            last_applied: 0,
-            ticks: 0,
-            rng,
-        }
+        let rng = config.id.0.wrapping_mul(0x0005_DEEC_E66D).wrapping_add(0xB);
+        Self { config, persistent, commit_index: 0, last_applied: 0, ticks: 0, rng }
     }
 
     #[inline]
@@ -309,7 +289,8 @@ impl Core {
     /// This is the latest configuration from the log, or the bootstrap config
     /// if no config entries exist. Per §4, config takes effect when appended.
     pub fn effective_config(&self) -> Configuration {
-        self.persistent.log
+        self.persistent
+            .log
             .config_at(self.persistent.log.last_index())
             .cloned()
             .unwrap_or_else(|| self.persistent.bootstrap_config.clone())
@@ -333,8 +314,8 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::log::EntryPayload;
+    use super::*;
     use crate::Command;
 
     fn test_core() -> Core {

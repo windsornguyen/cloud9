@@ -1,7 +1,7 @@
 //! Follower role.
 //!
 //! A follower:
-//! - Responds to AppendEntries from the leader
+//! - Responds to `AppendEntries` from the leader
 //! - Grants votes to candidates with up-to-date logs
 //! - Starts an election if election timeout elapses
 //!
@@ -11,13 +11,13 @@
 
 use crate::NodeId;
 
+use super::StepResult;
 use super::core::Core;
 use super::event::{
     AppendRequest, AppendResponse, Effects, Event, InstallSnapshotRequest, InstallSnapshotResponse,
     Message, Payload, PreVoteRequest, PreVoteResponse, VoteRequest, VoteResponse,
 };
 use super::log::Entry;
-use super::StepResult;
 
 /// Follower role state.
 #[derive(Debug, Clone)]
@@ -34,13 +34,8 @@ impl Follower {
     /// Create a new follower with a random election deadline.
     pub fn new(core: &mut Core, leader: Option<NodeId>) -> Self {
         let timeout = core.random_election_timeout();
-        let initial_contact =
-            core.ticks.saturating_sub(core.config.election_timeout.0);
-        Self {
-            leader,
-            election_deadline: core.ticks + timeout,
-            last_contact_tick: initial_contact,
-        }
+        let initial_contact = core.ticks.saturating_sub(core.config.election_timeout.0);
+        Self { leader, election_deadline: core.ticks + timeout, last_contact_tick: initial_contact }
     }
 
     /// Ticks until election timeout.
@@ -57,15 +52,17 @@ impl Follower {
             Event::Message(msg) => {
                 // Guard against disruptive elections (§4): if we've heard from a leader
                 // recently, do not update term or grant a vote.
-                if matches!(msg.payload, Payload::VoteRequest(_) | Payload::PreVoteRequest(_)) {
-                    if self.recently_heard_from_leader(core) {
-                        return StepResult::stay(self.reject_due_to_active_leader(core, &msg));
-                    }
+                if matches!(msg.payload, Payload::VoteRequest(_) | Payload::PreVoteRequest(_))
+                    && self.recently_heard_from_leader(core)
+                {
+                    return StepResult::stay(Self::reject_due_to_active_leader(core, &msg));
                 }
 
                 // PreVoteRequest doesn't update term (handled separately)
                 if let Payload::PreVoteRequest(req) = msg.payload {
-                    return StepResult::stay(self.handle_prevote_request(core, msg.from, msg.term, req));
+                    return StepResult::stay(Self::handle_prevote_request(
+                        core, msg.from, msg.term, req,
+                    ));
                 }
 
                 // Higher term: update and reset
@@ -80,12 +77,12 @@ impl Follower {
 
                 // Stale term: reject
                 if msg.term < core.term() {
-                    return StepResult::stay(self.reject_stale(core, &msg));
+                    return StepResult::stay(Self::reject_stale(core, &msg));
                 }
 
                 let StepResult { transition, mut effects } = match msg.payload {
                     Payload::VoteRequest(req) => self.handle_vote_request(core, msg.from, req),
-                    Payload::AppendRequest(req) => self.handle_append_request(core, msg.from, req),
+                    Payload::AppendRequest(req) => self.handle_append_request(core, msg.from, &req),
                     Payload::InstallSnapshotRequest(req) => {
                         self.handle_install_snapshot(core, msg.from, req)
                     }
@@ -145,7 +142,7 @@ impl Follower {
         &mut self,
         core: &mut Core,
         from: NodeId,
-        req: AppendRequest,
+        req: &AppendRequest,
     ) -> StepResult {
         self.leader = Some(from);
         self.record_contact(core);
@@ -206,7 +203,7 @@ impl Follower {
         StepResult::stay(effects.with_message(resp))
     }
 
-    /// Handle InstallSnapshot RPC (§5, Figure 5.3).
+    /// Handle `InstallSnapshot` RPC (§5, Figure 5.3).
     ///
     /// Per Figure 5.3 receiver implementation:
     /// 1. Reply immediately if term < currentTerm (handled by caller)
@@ -252,14 +249,12 @@ impl Follower {
             from: core.id(),
             to: from,
             term: core.term(),
-            payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse {
-                success: true,
-            }),
+            payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse { success: true }),
         };
         StepResult::stay(Effects::none().with_persist().with_message(resp))
     }
 
-    fn reject_stale(&self, core: &Core, msg: &Message) -> Effects {
+    fn reject_stale(core: &Core, msg: &Message) -> Effects {
         let payload = match &msg.payload {
             Payload::VoteRequest(_) => Payload::VoteResponse(VoteResponse { granted: false }),
             Payload::AppendRequest(_) => Payload::AppendResponse(AppendResponse {
@@ -276,13 +271,12 @@ impl Follower {
         })
     }
 
-    fn reject_due_to_active_leader(&self, core: &Core, msg: &Message) -> Effects {
+    fn reject_due_to_active_leader(core: &Core, msg: &Message) -> Effects {
         // Deny vote without updating term to preserve the current leader.
         let payload = match &msg.payload {
-            Payload::PreVoteRequest(_) => Payload::PreVoteResponse(PreVoteResponse {
-                term: core.term(),
-                granted: false,
-            }),
+            Payload::PreVoteRequest(_) => {
+                Payload::PreVoteResponse(PreVoteResponse { term: core.term(), granted: false })
+            }
             Payload::VoteRequest(_) => Payload::VoteResponse(VoteResponse { granted: false }),
             _ => return Effects::none(),
         };
@@ -295,7 +289,6 @@ impl Follower {
     }
 
     fn handle_prevote_request(
-        &self,
         core: &Core,
         from: NodeId,
         msg_term: u64,
@@ -312,10 +305,7 @@ impl Follower {
             from: core.id(),
             to: from,
             term: msg_term,
-            payload: Payload::PreVoteResponse(PreVoteResponse {
-                term: core.term(),
-                granted,
-            }),
+            payload: Payload::PreVoteResponse(PreVoteResponse { term: core.term(), granted }),
         })
     }
 
@@ -342,9 +332,9 @@ mod tests {
     use super::*;
     use crate::Command;
 
+    use super::super::Transition;
     use super::super::core::Config;
     use super::super::log::EntryPayload;
-    use super::super::Transition;
 
     fn test_setup() -> (Core, Follower) {
         let config = Config::new(NodeId(0))
@@ -386,10 +376,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 2,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
 
         let StepResult { transition, effects } = follower.step(&mut core, Event::Message(msg));
@@ -420,10 +407,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 1,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
 
         let StepResult { effects, .. } = follower.step(&mut core, Event::Message(msg));
@@ -444,10 +428,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(0),
             term: 2,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
         follower.step(&mut core, Event::Message(msg1));
 
@@ -456,10 +437,7 @@ mod tests {
             from: NodeId(2),
             to: NodeId(0),
             term: 2,
-            payload: Payload::VoteRequest(VoteRequest {
-                last_log_index: 0,
-                last_log_term: 0,
-            }),
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
         };
         let StepResult { effects, .. } = follower.step(&mut core, Event::Message(msg2));
 
@@ -525,12 +503,7 @@ mod tests {
         let (mut core, mut follower) = test_setup();
         core.persistent.term = 1;
 
-        let msg = Message {
-            from: NodeId(1),
-            to: NodeId(0),
-            term: 1,
-            payload: Payload::TimeoutNow,
-        };
+        let msg = Message { from: NodeId(1), to: NodeId(0), term: 1, payload: Payload::TimeoutNow };
 
         let StepResult { transition, .. } = follower.step(&mut core, Event::Message(msg));
         assert!(matches!(transition, Transition::ToCandidate));

@@ -47,7 +47,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Start { config } => {
             let config_path = config.unwrap_or_else(|| PathBuf::from("cloud9.toml"));
-            let maybe_config = load_config(config_path.clone())?;
+            let maybe_config = load_config(&config_path)?;
             tracing::info!(path = %config_path.display(), "booting node");
             if let Some(config) = maybe_config {
                 tracing::debug!(contents = %config, "loaded configuration");
@@ -56,7 +56,7 @@ fn main() -> Result<()> {
             }
         }
         Command::CheckConfig { config } => {
-            load_config(config.clone())
+            load_config(&config)
                 .and_then(|contents| {
                     contents.ok_or_else(|| miette::miette!("config `{}` missing", config.display()))
                 })
@@ -89,9 +89,9 @@ fn init_tracing(verbosity: u8, color_enabled: bool) -> Result<()> {
     tracing_subscriber::registry().with(filter).with(fmt_layer).try_init().into_diagnostic()
 }
 
-fn load_config(path: PathBuf) -> Result<Option<String>> {
+fn load_config(path: &PathBuf) -> Result<Option<String>> {
     if path.exists() {
-        fs::read_to_string(&path)
+        fs::read_to_string(path)
             .into_diagnostic()
             .map(Some)
             .with_context(|| format!("reading configuration from `{}`", path.display()))

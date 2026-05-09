@@ -1,4 +1,5 @@
 //! State machine testing for Raft consensus.
+#![allow(clippy::cast_possible_truncation, clippy::match_same_arms)]
 //!
 //! Uses proptest-state-machine to verify Raft properties by generating
 //! random sequences of transitions and checking invariants after each step.
@@ -10,7 +11,7 @@ use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 use proptest::test_runner::Config;
-use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
+use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 
 use cloud9_raft::raft::{Config as RaftConfig, Effects, Message, RaftNode};
 use cloud9_raft::{NodeId, Term};
@@ -51,7 +52,7 @@ pub enum Transition {
 /// Abstract reference model of a Raft cluster.
 ///
 /// Tracks bounds for the state machine test.
-/// The SUT (RaftClusterSUT) is the source of truth; this just tracks
+/// The SUT (`RaftClusterSUT`) is the source of truth; this just tracks
 /// what transitions are valid.
 #[derive(Clone, Debug)]
 pub struct RaftClusterRef {
@@ -67,12 +68,7 @@ pub struct RaftClusterRef {
 
 impl RaftClusterRef {
     fn new() -> Self {
-        Self {
-            max_term: 0,
-            max_log_len: 0,
-            has_leader: false,
-            pending_count: 0,
-        }
+        Self { max_term: 0, max_log_len: 0, has_leader: false, pending_count: 0 }
     }
 }
 
@@ -91,34 +87,18 @@ impl ReferenceStateMachine for RaftStateMachine {
 
         // Tick any node (if we haven't exceeded term limit)
         if state.max_term < MAX_TERM {
-            strategies.push(
-                (0..CLUSTER_SIZE)
-                    .prop_map(Transition::Tick)
-                    .boxed(),
-            );
+            strategies.push((0..CLUSTER_SIZE).prop_map(Transition::Tick).boxed());
         }
 
         // Deliver or drop pending message
         if state.pending_count > 0 {
-            strategies.push(
-                (0..state.pending_count)
-                    .prop_map(Transition::DeliverMessage)
-                    .boxed(),
-            );
-            strategies.push(
-                (0..state.pending_count)
-                    .prop_map(Transition::DropMessage)
-                    .boxed(),
-            );
+            strategies.push((0..state.pending_count).prop_map(Transition::DeliverMessage).boxed());
+            strategies.push((0..state.pending_count).prop_map(Transition::DropMessage).boxed());
         }
 
         // Propose on a node (if log isn't too long and there's a leader)
         if state.max_log_len < MAX_LOG_LEN && state.has_leader {
-            strategies.push(
-                (0..CLUSTER_SIZE)
-                    .prop_map(Transition::Propose)
-                    .boxed(),
-            );
+            strategies.push((0..CLUSTER_SIZE).prop_map(Transition::Propose).boxed());
         }
 
         // If no strategies, just tick
@@ -152,9 +132,7 @@ impl ReferenceStateMachine for RaftStateMachine {
             Transition::DeliverMessage(idx) | Transition::DropMessage(idx) => {
                 *idx < state.pending_count
             }
-            Transition::Propose(idx) => {
-                *idx < CLUSTER_SIZE && state.max_log_len < MAX_LOG_LEN
-            }
+            Transition::Propose(idx) => *idx < CLUSTER_SIZE && state.max_log_len < MAX_LOG_LEN,
         }
     }
 }
@@ -170,14 +148,8 @@ pub struct RaftClusterSUT {
 impl RaftClusterSUT {
     fn new() -> Self {
         let voters = node_ids();
-        let nodes = voters
-            .iter()
-            .map(|&id| RaftNode::new(raft_config(id), &voters))
-            .collect();
-        Self {
-            nodes,
-            pending_messages: vec![],
-        }
+        let nodes = voters.iter().map(|&id| RaftNode::new(raft_config(id), &voters)).collect();
+        Self { nodes, pending_messages: vec![] }
     }
 
     fn process_effects(&mut self, effects: &Effects) {
@@ -242,12 +214,11 @@ impl StateMachineTest for RaftClusterSUT {
                 }
             }
             Transition::Propose(idx) => {
-                if idx < state.nodes.len() && state.nodes[idx].is_leader() {
-                    if let Ok((_, effects)) =
-                        state.nodes[idx].propose(cloud9_raft::Command(vec![]))
-                    {
-                        state.process_effects(&effects);
-                    }
+                if idx < state.nodes.len()
+                    && state.nodes[idx].is_leader()
+                    && let Ok((_, effects)) = state.nodes[idx].propose(cloud9_raft::Command(vec![]))
+                {
+                    state.process_effects(&effects);
                 }
             }
         }
@@ -309,9 +280,8 @@ impl StateMachineTest for RaftClusterSUT {
                             let prev_term_j = log_j.term_at(prev_idx);
                             assert_eq!(
                                 prev_term_i, prev_term_j,
-                                "Log matching violated: nodes {} and {} have same term {} at index {}, \
-                                 but different terms at index {} ({} vs {})",
-                                i, j, term_i, idx, prev_idx, prev_term_i, prev_term_j
+                                "Log matching violated: nodes {i} and {j} have same term {term_i} at index {idx}, \
+                                 but different terms at index {prev_idx} ({prev_term_i} vs {prev_term_j})"
                             );
                         }
                     }
@@ -332,9 +302,8 @@ impl StateMachineTest for RaftClusterSUT {
                     let term_j = state.nodes[j].persistent().log.term_at(idx);
                     assert_eq!(
                         term_i, term_j,
-                        "State machine safety violated: committed entries at index {} \
-                         have different terms: node {} has term {}, node {} has term {}",
-                        idx, i, term_i, j, term_j
+                        "State machine safety violated: committed entries at index {idx} \
+                         have different terms: node {i} has term {term_i}, node {j} has term {term_j}"
                     );
                 }
             }
@@ -415,12 +384,7 @@ mod focused_tests {
             // Check election safety
             let leaders_by_term = cluster.leaders_by_term();
             for (term, leaders) in &leaders_by_term {
-                assert!(
-                    leaders.len() <= 1,
-                    "Election safety violated at term {}: {:?}",
-                    term,
-                    leaders
-                );
+                assert!(leaders.len() <= 1, "Election safety violated at term {term}: {leaders:?}");
             }
         }
     }

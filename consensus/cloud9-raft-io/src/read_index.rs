@@ -9,7 +9,7 @@
 //! 2. Leader records the current commit index as the "read index"
 //! 3. Leader sends a heartbeat round and waits for majority acknowledgment
 //! 4. Once majority confirms, the leader is guaranteed to still be leader
-//! 5. The read can proceed once the state machine has applied up to read_index
+//! 5. The read can proceed once the state machine has applied up to `read_index`
 //!
 //! This module provides `ReadIndexCoordinator` which tracks pending reads and
 //! completes them when heartbeat quorum is achieved.
@@ -33,7 +33,7 @@ impl ReadId {
 /// A pending read request awaiting heartbeat confirmation.
 #[derive(Debug)]
 struct PendingRead {
-    /// The read index (commit_index when request was made).
+    /// The read index (`commit_index` when request was made).
     read_index: LogIndex,
     /// Heartbeat round this read is waiting on.
     round: u64,
@@ -134,13 +134,7 @@ impl ReadIndexCoordinator {
     /// The caller is responsible for checking `can_serve_reads()` before calling this.
     pub fn request_read(&mut self, read_index: LogIndex) -> ReadId {
         let id = self.next_read_id.next();
-        self.pending.insert(
-            id,
-            PendingRead {
-                read_index,
-                round: self.current_round,
-            },
-        );
+        self.pending.insert(id, PendingRead { read_index, round: self.current_round });
         id
     }
 
@@ -166,7 +160,7 @@ impl ReadIndexCoordinator {
     /// Record a heartbeat acknowledgment from a peer.
     ///
     /// Call this when an `AppendResponse { success: true }` is received
-    /// from a heartbeat (empty AppendEntries).
+    /// from a heartbeat (empty `AppendEntries`).
     pub fn record_ack(&mut self, from: NodeId) {
         if !self.round_acks.contains(&from) && self.voters.contains(&from) {
             self.round_acks.push(from);

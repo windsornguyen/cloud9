@@ -5,16 +5,10 @@ use cloud9_storage::StorageOptions;
 use tracing::{info, instrument};
 
 /// Runtime configuration derived from CLI flags and config files.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NodeConfig {
     pub storage: StorageOptions,
     pub consensus: ConsensusConfig,
-}
-
-impl Default for NodeConfig {
-    fn default() -> Self {
-        Self { storage: StorageOptions::default(), consensus: ConsensusConfig::default() }
-    }
 }
 
 /// Launch the storage and consensus subsystems.

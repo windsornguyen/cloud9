@@ -1,6 +1,14 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-#![cfg_attr(any(test, doctest), allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    any(test, doctest),
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::cast_possible_truncation
+    )
+)]
 
 //! Consensus drivers for Cloud9 clusters.
 //!

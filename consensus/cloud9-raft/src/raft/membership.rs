@@ -44,7 +44,7 @@ pub enum MembershipMode {
 /// Can be either a simple configuration (single voter set) or a joint
 /// configuration (requires majorities from both old and new).
 ///
-/// Internally uses BTreeSet for O(log n) membership checks and zero-allocation
+/// Internally uses `BTreeSet` for O(log n) membership checks and zero-allocation
 /// iteration. Serializes as sorted vectors for determinism.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Configuration {
@@ -73,9 +73,9 @@ pub enum Configuration {
     },
 }
 
-/// Serde helper to serialize BTreeSet as Vec for stable output.
+/// Serde helper to serialize `BTreeSet` as Vec for stable output.
 mod btreeset_as_vec {
-    use super::*;
+    use super::{BTreeSet, Deserialize, NodeId};
     use serde::{Deserializer, Serializer};
 
     pub(super) fn serialize<S: Serializer>(
@@ -101,10 +101,7 @@ mod btreeset_as_vec {
 impl Configuration {
     /// Create a simple configuration from voters.
     pub fn simple(voters: impl IntoIterator<Item = NodeId>) -> Self {
-        Self::Simple {
-            voters: voters.into_iter().collect(),
-            learners: BTreeSet::new(),
-        }
+        Self::Simple { voters: voters.into_iter().collect(), learners: BTreeSet::new() }
     }
 
     /// Create a simple configuration with explicit learners.
@@ -172,16 +169,14 @@ impl Configuration {
     /// Check if a node is a learner.
     pub fn is_learner(&self, id: NodeId) -> bool {
         match self {
-            Self::Simple { learners, .. } => learners.contains(&id),
-            Self::Joint { learners, .. } => learners.contains(&id),
+            Self::Simple { learners, .. } | Self::Joint { learners, .. } => learners.contains(&id),
         }
     }
 
     /// All learners (non-voting). No allocation.
     pub fn learners(&self) -> impl Iterator<Item = NodeId> + '_ {
         let learners = match self {
-            Self::Simple { learners, .. } => learners,
-            Self::Joint { learners, .. } => learners,
+            Self::Simple { learners, .. } | Self::Joint { learners, .. } => learners,
         };
         learners.iter().copied()
     }
@@ -225,7 +220,7 @@ impl Configuration {
     /// Number of votes needed for quorum in each voter set.
     ///
     /// For simple configs, returns (quorum, None).
-    /// For joint configs, returns (old_quorum, Some(new_quorum)).
+    /// For joint configs, returns (`old_quorum`, `Some(new_quorum)`).
     pub fn quorum_sizes(&self) -> (usize, Option<usize>) {
         match self {
             Self::Simple { voters, .. } => (voters.len() / 2 + 1, None),
@@ -240,19 +235,19 @@ impl Configuration {
         match self {
             Self::Simple { voters, .. } => {
                 let votes = voters.iter().filter(|&&id| has_vote(id)).count();
-                votes >= voters.len() / 2 + 1
+                votes > voters.len() / 2
             }
             Self::Joint { old, new, .. } => {
                 let old_votes = old.iter().filter(|&&id| has_vote(id)).count();
                 let new_votes = new.iter().filter(|&&id| has_vote(id)).count();
-                old_votes >= old.len() / 2 + 1 && new_votes >= new.len() / 2 + 1
+                old_votes > old.len() / 2 && new_votes > new.len() / 2
             }
         }
     }
 
-    /// Iterate over voters, yielding (voter, old_member, new_member).
+    /// Iterate over voters, yielding (voter, `old_member`, `new_member`).
     ///
-    /// For simple configs, both old_member and new_member are true for all voters.
+    /// For simple configs, both `old_member` and `new_member` are true for all voters.
     /// For joint configs, indicates membership in each set.
     pub fn voter_membership(&self) -> Vec<(NodeId, bool, bool)> {
         match self {
@@ -276,24 +271,20 @@ impl Configuration {
 
     /// Get the target configuration for completing a joint transition.
     ///
-    /// Returns Some(new_config) if this is a joint config, None if simple.
+    /// Returns `Some(new_config)` if this is a joint config, None if simple.
     pub fn transition_target(&self) -> Option<Configuration> {
         match self {
             Self::Simple { .. } => None,
-            Self::Joint { new, learners, .. } => Some(Configuration::Simple {
-                voters: new.clone(),
-                learners: learners.clone(),
-            }),
+            Self::Joint { new, learners, .. } => {
+                Some(Configuration::Simple { voters: new.clone(), learners: learners.clone() })
+            }
         }
     }
 }
 
 impl Default for Configuration {
     fn default() -> Self {
-        Self::Simple {
-            voters: BTreeSet::new(),
-            learners: BTreeSet::new(),
-        }
+        Self::Simple { voters: BTreeSet::new(), learners: BTreeSet::new() }
     }
 }
 
@@ -358,7 +349,7 @@ pub enum ConfigChange {
     AddLearner(NodeId),
     /// Remove a learner.
     RemoveLearner(NodeId),
-    /// Set a completely new configuration (only valid in JointConsensus mode).
+    /// Set a completely new configuration (only valid in `JointConsensus` mode).
     SetMembers(Members),
 }
 
@@ -418,8 +409,10 @@ impl ConfigChange {
                 }
                 if mode == MembershipMode::SingleServer {
                     // Validate single-server constraint: at most one voter changes
-                    let added: Vec<_> = new_voters.iter().filter(|id| !voters.contains(id)).collect();
-                    let removed: Vec<_> = voters.iter().filter(|id| !new_voters.contains(id)).collect();
+                    let added: Vec<_> =
+                        new_voters.iter().filter(|id| !voters.contains(id)).collect();
+                    let removed: Vec<_> =
+                        voters.iter().filter(|id| !new_voters.contains(id)).collect();
 
                     if added.len() + removed.len() > 1 {
                         return Err(ConfigChangeError::NotSingleChange {
@@ -432,10 +425,8 @@ impl ConfigChange {
                     return Err(ConfigChangeError::WouldBeEmpty);
                 }
                 // Ensure no overlap between voters and learners
-                if new_voters.iter().any(|id| new_learners.contains(id)) {
-                    return Err(ConfigChangeError::AlreadyVoter(
-                        *new_voters.iter().find(|id| new_learners.contains(id)).unwrap(),
-                    ));
+                if let Some(id) = new_voters.iter().find(|id| new_learners.contains(id)) {
+                    return Err(ConfigChangeError::AlreadyVoter(*id));
                 }
             }
         }
@@ -445,8 +436,8 @@ impl ConfigChange {
 
     /// Apply this change to produce the next configuration.
     ///
-    /// For SingleServer mode, returns the new simple configuration directly.
-    /// For JointConsensus mode, returns a joint configuration (for SetMembers)
+    /// For `SingleServer` mode, returns the new simple configuration directly.
+    /// For `JointConsensus` mode, returns a joint configuration (for `SetMembers`)
     /// or simple configuration (for Add/Remove which are single changes).
     pub fn apply(&self, current: &Configuration, mode: MembershipMode) -> Configuration {
         let (voters, learners): (BTreeSet<NodeId>, BTreeSet<NodeId>) = match current {
@@ -460,51 +451,32 @@ impl ConfigChange {
                 new_voters.insert(*id);
                 let mut new_learners = learners;
                 new_learners.remove(id);
-                Configuration::Simple {
-                    voters: new_voters,
-                    learners: new_learners,
-                }
+                Configuration::Simple { voters: new_voters, learners: new_learners }
             }
             ConfigChange::RemoveVoter(id) => {
                 let mut new_voters = voters;
                 new_voters.remove(id);
-                Configuration::Simple {
-                    voters: new_voters,
-                    learners,
-                }
+                Configuration::Simple { voters: new_voters, learners }
             }
             ConfigChange::AddLearner(id) => {
                 let mut new_learners = learners;
                 new_learners.insert(*id);
-                Configuration::Simple {
-                    voters,
-                    learners: new_learners,
-                }
+                Configuration::Simple { voters, learners: new_learners }
             }
             ConfigChange::RemoveLearner(id) => {
                 let mut new_learners = learners;
                 new_learners.remove(id);
-                Configuration::Simple {
-                    voters,
-                    learners: new_learners,
-                }
+                Configuration::Simple { voters, learners: new_learners }
             }
             ConfigChange::SetMembers(members) => {
                 let new_voters: BTreeSet<_> = members.voters().iter().copied().collect();
                 let new_learners: BTreeSet<_> = members.learners().iter().copied().collect();
                 if mode == MembershipMode::JointConsensus && voters != new_voters {
                     // Enter joint consensus
-                    Configuration::Joint {
-                        old: voters,
-                        new: new_voters,
-                        learners: new_learners,
-                    }
+                    Configuration::Joint { old: voters, new: new_voters, learners: new_learners }
                 } else {
                     // Single-server mode or no actual change
-                    Configuration::Simple {
-                        voters: new_voters,
-                        learners: new_learners,
-                    }
+                    Configuration::Simple { voters: new_voters, learners: new_learners }
                 }
             }
         }
@@ -534,7 +506,7 @@ pub enum ConfigChangeError {
     WouldBeEmpty,
     /// No actual change (voters and learners identical).
     NoChange,
-    /// SingleServer mode requires exactly one change at a time.
+    /// `SingleServer` mode requires exactly one change at a time.
     NotSingleChange { added: usize, removed: usize },
     /// This node is not the leader.
     NotLeader,
@@ -544,24 +516,23 @@ impl std::fmt::Display for ConfigChangeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChangeInProgress => write!(f, "configuration change already in progress"),
-            Self::AlreadyVoter(id) => write!(f, "{} is already a voter", id),
-            Self::AlreadyLearner(id) => write!(f, "{} is already a learner", id),
-            Self::Overlap(id) => write!(f, "{} cannot be both voter and learner", id),
+            Self::AlreadyVoter(id) => write!(f, "{id} is already a voter"),
+            Self::AlreadyLearner(id) => write!(f, "{id} is already a learner"),
+            Self::Overlap(id) => write!(f, "{id} cannot be both voter and learner"),
             Self::PromoteRequiresLearner(id) => {
-                write!(f, "{} must be added as a learner before becoming a voter", id)
+                write!(f, "{id} must be added as a learner before becoming a voter")
             }
             Self::LearnerNotCaughtUp { id, have, need } => {
-                write!(f, "{} not caught up: have {}, need {}", id, have, need)
+                write!(f, "{id} not caught up: have {have}, need {need}")
             }
-            Self::NotVoter(id) => write!(f, "{} is not a voter", id),
-            Self::NotLearner(id) => write!(f, "{} is not a learner", id),
+            Self::NotVoter(id) => write!(f, "{id} is not a voter"),
+            Self::NotLearner(id) => write!(f, "{id} is not a learner"),
             Self::WouldBeEmpty => write!(f, "change would result in empty cluster"),
             Self::NoChange => write!(f, "configuration unchanged"),
             Self::NotSingleChange { added, removed } => {
                 write!(
                     f,
-                    "single-server mode requires exactly one change, got {} added and {} removed",
-                    added, removed
+                    "single-server mode requires exactly one change, got {added} added and {removed} removed"
                 )
             }
             Self::NotLeader => write!(f, "not the leader"),
@@ -619,16 +590,14 @@ mod tests {
 
     #[test]
     fn single_server_add_voter() {
-        let current = Configuration::simple_with_learners(vec![NodeId(0), NodeId(1)], vec![NodeId(2)]);
+        let current =
+            Configuration::simple_with_learners(vec![NodeId(0), NodeId(1)], vec![NodeId(2)]);
         let change = ConfigChange::AddVoter(NodeId(2));
 
         assert!(change.validate(&current, MembershipMode::SingleServer).is_ok());
 
         let new = change.apply(&current, MembershipMode::SingleServer);
-        assert_eq!(
-            new,
-            Configuration::simple(vec![NodeId(0), NodeId(1), NodeId(2)])
-        );
+        assert_eq!(new, Configuration::simple(vec![NodeId(0), NodeId(1), NodeId(2)]));
     }
 
     #[test]
@@ -645,10 +614,13 @@ mod tests {
     #[test]
     fn single_server_rejects_multiple_changes() {
         let current = Configuration::simple(vec![NodeId(0), NodeId(1)]);
-        let change = ConfigChange::SetMembers(Members::new(
-            vec![NodeId(2), NodeId(3)], // +2, -2
-            vec![],
-        ).unwrap());
+        let change = ConfigChange::SetMembers(
+            Members::new(
+                vec![NodeId(2), NodeId(3)], // +2, -2
+                vec![],
+            )
+            .unwrap(),
+        );
 
         let err = change.validate(&current, MembershipMode::SingleServer).unwrap_err();
         assert!(matches!(err, ConfigChangeError::NotSingleChange { .. }));
@@ -657,10 +629,8 @@ mod tests {
     #[test]
     fn joint_consensus_creates_joint_config() {
         let current = Configuration::simple(vec![NodeId(0), NodeId(1)]);
-        let change = ConfigChange::SetMembers(Members::new(
-            vec![NodeId(2), NodeId(3)],
-            vec![],
-        ).unwrap());
+        let change =
+            ConfigChange::SetMembers(Members::new(vec![NodeId(2), NodeId(3)], vec![]).unwrap());
 
         assert!(change.validate(&current, MembershipMode::JointConsensus).is_ok());
 
@@ -668,19 +638,13 @@ mod tests {
         assert!(new.is_joint());
         assert_eq!(
             new,
-            Configuration::joint(
-                vec![NodeId(0), NodeId(1)],
-                vec![NodeId(2), NodeId(3)]
-            )
+            Configuration::joint(vec![NodeId(0), NodeId(1)], vec![NodeId(2), NodeId(3)])
         );
     }
 
     #[test]
     fn rejects_change_during_joint() {
-        let current = Configuration::joint(
-            vec![NodeId(0), NodeId(1)],
-            vec![NodeId(1), NodeId(2)],
-        );
+        let current = Configuration::joint(vec![NodeId(0), NodeId(1)], vec![NodeId(1), NodeId(2)]);
         let change = ConfigChange::AddVoter(NodeId(3));
 
         let err = change.validate(&current, MembershipMode::JointConsensus).unwrap_err();
@@ -719,10 +683,7 @@ mod tests {
         let simple = Configuration::simple_with_learners(vec![NodeId(0)], vec![NodeId(5)]);
         assert!(simple.transition_target().is_none());
 
-        let joint = Configuration::joint(
-            vec![NodeId(0), NodeId(1)],
-            vec![NodeId(1), NodeId(2)],
-        );
+        let joint = Configuration::joint(vec![NodeId(0), NodeId(1)], vec![NodeId(1), NodeId(2)]);
         assert_eq!(
             joint.transition_target(),
             Some(Configuration::simple_with_learners(vec![NodeId(1), NodeId(2)], vec![]))
@@ -731,10 +692,7 @@ mod tests {
 
     #[test]
     fn voter_membership() {
-        let joint = Configuration::joint(
-            vec![NodeId(0), NodeId(1)],
-            vec![NodeId(1), NodeId(2)],
-        );
+        let joint = Configuration::joint(vec![NodeId(0), NodeId(1)], vec![NodeId(1), NodeId(2)]);
 
         let membership = joint.voter_membership();
         // Node 0: in old, not in new
@@ -771,7 +729,8 @@ mod tests {
 
     #[test]
     fn rejects_no_op_set_members() {
-        let current = Configuration::simple_with_learners(vec![NodeId(0), NodeId(1)], vec![NodeId(2)]);
+        let current =
+            Configuration::simple_with_learners(vec![NodeId(0), NodeId(1)], vec![NodeId(2)]);
         let change = ConfigChange::SetMembers(
             Members::new(vec![NodeId(0), NodeId(1)], vec![NodeId(2)]).unwrap(),
         );

@@ -107,9 +107,7 @@ impl Log {
         if index == 0 || index <= self.snapshot_index {
             0
         } else {
-            self.to_vec_index(index)
-                .and_then(|i| self.entries.get(i))
-                .map_or(0, |e| e.term)
+            self.to_vec_index(index).and_then(|i| self.entries.get(i)).map_or(0, |e| e.term)
         }
     }
 
@@ -153,7 +151,8 @@ impl Log {
         }
 
         // Remove entries up to and including index
-        let entries_to_remove = (index - self.snapshot_index) as usize;
+        let entries_to_remove =
+            usize::try_from(index - self.snapshot_index).unwrap_or(self.entries.len());
         if entries_to_remove >= self.entries.len() {
             self.entries.clear();
         } else {
@@ -164,7 +163,7 @@ impl Log {
         self.snapshot_term = term;
     }
 
-    /// Install snapshot metadata (for followers receiving InstallSnapshot).
+    /// Install snapshot metadata (for followers receiving `InstallSnapshot`).
     ///
     /// Discards all entries and sets snapshot metadata.
     pub fn install_snapshot(&mut self, index: LogIndex, term: Term) {
@@ -187,8 +186,7 @@ impl Log {
         let Some(s) = self.to_vec_index(actual_start) else {
             return &[];
         };
-        let e = self.to_vec_index(end.min(self.last_index()))
-            .map_or(self.entries.len(), |i| i + 1);
+        let e = self.to_vec_index(end.min(self.last_index())).map_or(self.entries.len(), |i| i + 1);
 
         if s >= self.entries.len() || s >= e {
             return &[];
@@ -212,23 +210,21 @@ impl Log {
 
     /// Find the latest configuration entry at or before the given index.
     ///
-    /// Only searches available entries (after snapshot_index).
+    /// Only searches available entries (after `snapshot_index`).
     /// Returns None if no config entry exists in available range.
     pub fn config_at(&self, index: LogIndex) -> Option<&Configuration> {
         if index <= self.snapshot_index {
             return None;
         }
-        let end_vec_idx = self.to_vec_index(index)
+        let end_vec_idx = self
+            .to_vec_index(index)
             .map_or(self.entries.len(), |i| (i + 1).min(self.entries.len()));
-        self.entries[..end_vec_idx]
-            .iter()
-            .rev()
-            .find_map(|e| e.payload.as_config())
+        self.entries[..end_vec_idx].iter().rev().find_map(|e| e.payload.as_config())
     }
 
     /// Find the index of the latest uncommitted configuration entry.
     ///
-    /// Returns Some(index) if there's a config entry after commit_index.
+    /// Returns Some(index) if there's a config entry after `commit_index`.
     pub fn pending_config_index(&self, commit_index: LogIndex) -> Option<LogIndex> {
         self.entries
             .iter()
@@ -245,7 +241,7 @@ impl Log {
         if index <= self.snapshot_index {
             None
         } else {
-            Some((index - self.snapshot_index - 1) as usize)
+            usize::try_from(index - self.snapshot_index - 1).ok()
         }
     }
 }
@@ -256,19 +252,11 @@ mod tests {
     use crate::NodeId;
 
     fn entry(term: Term, index: LogIndex) -> Entry {
-        Entry {
-            term,
-            index,
-            payload: EntryPayload::Command(Command(vec![index as u8])),
-        }
+        Entry { term, index, payload: EntryPayload::Command(Command(vec![index as u8])) }
     }
 
     fn config_entry(term: Term, index: LogIndex, voters: Vec<NodeId>) -> Entry {
-        Entry {
-            term,
-            index,
-            payload: EntryPayload::Config(Configuration::simple(voters)),
-        }
+        Entry { term, index, payload: EntryPayload::Config(Configuration::simple(voters)) }
     }
 
     #[test]
@@ -446,7 +434,7 @@ mod tests {
         assert_eq!(log.snapshot_term(), 2);
         assert!(log.get(3).is_none());
         assert_eq!(log.last_index(), 3); // last_index == snapshot_index when empty
-        assert_eq!(log.last_term(), 2);  // last_term == snapshot_term when empty
+        assert_eq!(log.last_term(), 2); // last_term == snapshot_term when empty
     }
 
     #[test]
