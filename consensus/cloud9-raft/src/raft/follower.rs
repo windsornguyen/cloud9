@@ -210,8 +210,8 @@ impl Follower {
     /// 2. Create/write snapshot file at given offset (delegated to I/O layer)
     /// 3. If done is false, reply and wait for more chunks (delegated to I/O)
     /// 4. If existing log entry has same index/term as snapshot's last entry,
-    ///    retain entries following it and reply (we simplify: always discard)
-    /// 5. Discard entire log
+    ///    retain entries following it and reply
+    /// 5. Otherwise discard the log suffix
     /// 6. Reset state machine using snapshot contents (delegated to I/O layer)
     fn handle_install_snapshot(
         &mut self,
@@ -232,24 +232,50 @@ impl Follower {
                 term: core.term(),
                 payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse {
                     success: false,
+                    last_included_index: req.last_included_index,
+                }),
+            };
+            return StepResult::stay(Effects::none().with_message(resp));
+        }
+
+        if req.last_included_index < core.commit_index
+            && !core.log().snapshot_matches_prefix(req.last_included_index, req.last_included_term)
+        {
+            let resp = Message {
+                from: core.id(),
+                to: from,
+                term: core.term(),
+                payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse {
+                    success: false,
+                    last_included_index: req.last_included_index,
                 }),
             };
             return StepResult::stay(Effects::none().with_message(resp));
         }
 
         // §5, step 5: Discard entire log and install snapshot metadata
-        core.log_mut().install_snapshot(req.last_included_index, req.last_included_term);
+        core.log_mut().install_snapshot(
+            req.last_included_index,
+            req.last_included_term,
+            req.configuration,
+        );
 
         // Update commit index to at least snapshot index
         if req.last_included_index > core.commit_index {
             core.commit_index = req.last_included_index;
+        }
+        if req.last_included_index > core.last_applied {
+            core.last_applied = req.last_included_index;
         }
 
         let resp = Message {
             from: core.id(),
             to: from,
             term: core.term(),
-            payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse { success: true }),
+            payload: Payload::InstallSnapshotResponse(InstallSnapshotResponse {
+                success: true,
+                last_included_index: req.last_included_index,
+            }),
         };
         StepResult::stay(Effects::none().with_persist().with_message(resp))
     }
@@ -335,6 +361,7 @@ mod tests {
     use super::super::Transition;
     use super::super::core::Config;
     use super::super::log::EntryPayload;
+    use super::super::membership::Configuration;
 
     fn test_setup() -> (Core, Follower) {
         let config = Config::new(NodeId(0))
@@ -560,6 +587,7 @@ mod tests {
             payload: Payload::InstallSnapshotRequest(InstallSnapshotRequest {
                 last_included_index: 5,
                 last_included_term: 1,
+                configuration: Configuration::simple(vec![NodeId(0), NodeId(1), NodeId(2)]),
             }),
         };
 
@@ -578,6 +606,7 @@ mod tests {
         // Response should be success
         if let Payload::InstallSnapshotResponse(resp) = &effects.messages[0].payload {
             assert!(resp.success);
+            assert_eq!(resp.last_included_index, 5);
         } else {
             panic!("expected InstallSnapshotResponse");
         }
@@ -601,6 +630,7 @@ mod tests {
             payload: Payload::InstallSnapshotRequest(InstallSnapshotRequest {
                 last_included_index: 3,
                 last_included_term: 1,
+                configuration: Configuration::simple(vec![NodeId(0), NodeId(1), NodeId(2)]),
             }),
         };
         follower.step(&mut core, Event::Message(msg));
@@ -614,7 +644,7 @@ mod tests {
         core.persistent.term = 2;
 
         // We already have a snapshot at index 5
-        core.log_mut().install_snapshot(5, 1);
+        core.log_mut().install_snapshot(5, 1, Configuration::simple(vec![NodeId(0)]));
 
         let msg = Message {
             from: NodeId(1),
@@ -623,6 +653,7 @@ mod tests {
             payload: Payload::InstallSnapshotRequest(InstallSnapshotRequest {
                 last_included_index: 3, // Older than our snapshot
                 last_included_term: 1,
+                configuration: Configuration::simple(vec![NodeId(0), NodeId(1), NodeId(2)]),
             }),
         };
 
@@ -634,6 +665,42 @@ mod tests {
         // Response should indicate not accepted
         if let Payload::InstallSnapshotResponse(resp) = &effects.messages[0].payload {
             assert!(!resp.success);
+            assert_eq!(resp.last_included_index, 3);
+        } else {
+            panic!("expected InstallSnapshotResponse");
+        }
+    }
+
+    #[test]
+    fn rejects_snapshot_that_would_discard_committed_suffix() {
+        let (mut core, mut follower) = test_setup();
+        core.persistent.term = 2;
+        for i in 1..=5 {
+            core.log_mut().append(Entry {
+                term: 1,
+                index: i,
+                payload: EntryPayload::Command(Command(vec![i as u8])),
+            });
+        }
+        core.commit_index = 5;
+
+        let msg = Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 2,
+            payload: Payload::InstallSnapshotRequest(InstallSnapshotRequest {
+                last_included_index: 3,
+                last_included_term: 2,
+                configuration: Configuration::simple(vec![NodeId(0), NodeId(1), NodeId(2)]),
+            }),
+        };
+
+        let StepResult { effects, .. } = follower.step(&mut core, Event::Message(msg));
+
+        assert_eq!(core.log().last_index(), 5);
+        if let Payload::InstallSnapshotResponse(resp) = &effects.messages[0].payload {
+            assert!(!resp.success);
+            assert_eq!(resp.last_included_index, 3);
         } else {
             panic!("expected InstallSnapshotResponse");
         }

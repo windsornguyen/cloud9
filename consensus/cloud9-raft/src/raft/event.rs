@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{LogIndex, NodeId, Term};
 
 use super::log::Entry;
+use super::membership::Configuration;
 
 /// An input event to the Raft automaton.
 #[derive(Debug, Clone)]
@@ -115,7 +116,7 @@ pub struct AppendResponse {
 /// This message carries metadata only — actual snapshot data transfer is
 /// handled by the I/O layer. The full RPC in Figure 5.3 includes `offset`,
 /// `data[]`, and `done` fields for chunked transfer; we delegate that to I/O.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallSnapshotRequest {
     /// Index of the last entry included in the snapshot.
     /// Corresponds to `lastIncludedIndex` in Figure 5.3.
@@ -123,6 +124,8 @@ pub struct InstallSnapshotRequest {
     /// Term of the last entry included in the snapshot.
     /// Corresponds to `lastIncludedTerm` in Figure 5.3.
     pub last_included_term: Term,
+    /// Latest configuration as of `last_included_index`.
+    pub configuration: Configuration,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -130,6 +133,8 @@ pub struct InstallSnapshotResponse {
     /// True if the snapshot was accepted.
     /// Per §5, follower should accept if snapshot is more recent than its log.
     pub success: bool,
+    /// Index of the last entry included in the accepted snapshot.
+    pub last_included_index: LogIndex,
 }
 
 /// Effects produced by a step of the automaton.
@@ -148,7 +153,7 @@ pub struct Effects {
     /// Snapshot to send to a follower (leader only).
     /// The I/O layer should transfer the snapshot data and then send
     /// an `InstallSnapshotRequest` to the follower.
-    pub send_snapshot: Option<SendSnapshot>,
+    pub send_snapshots: Vec<SendSnapshot>,
 }
 
 /// Request to send a snapshot to a slow follower.
@@ -160,6 +165,8 @@ pub struct SendSnapshot {
     pub last_included_index: LogIndex,
     /// Term of the last entry included in the snapshot.
     pub last_included_term: Term,
+    /// Latest configuration as of `last_included_index`.
+    pub configuration: Configuration,
 }
 
 impl Effects {
@@ -187,7 +194,7 @@ impl Effects {
 
     #[must_use]
     pub fn with_send_snapshot(mut self, snapshot: SendSnapshot) -> Self {
-        self.send_snapshot = Some(snapshot);
+        self.send_snapshots.push(snapshot);
         self
     }
 
@@ -195,9 +202,7 @@ impl Effects {
     pub fn merge(mut self, other: Effects) -> Self {
         self.persist |= other.persist;
         self.messages.extend(other.messages);
-        if other.send_snapshot.is_some() {
-            self.send_snapshot = other.send_snapshot;
-        }
+        self.send_snapshots.extend(other.send_snapshots);
         self
     }
 }
