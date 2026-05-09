@@ -31,6 +31,8 @@ fn classify_message(payload: &Payload) -> &'static str {
         Payload::AppendResponse(_) => "AppendResponse",
         Payload::InstallSnapshotRequest(_) => "InstallSnapshotRequest",
         Payload::InstallSnapshotResponse(_) => "InstallSnapshotResponse",
+        Payload::ReadIndexRequest(_) => "ReadIndexRequest",
+        Payload::ReadIndexResponse(_) => "ReadIndexResponse",
         Payload::TimeoutNow => "TimeoutNow",
     }
 }

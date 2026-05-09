@@ -172,6 +172,34 @@ impl fmt::Display for ProposeError {
 
 impl std::error::Error for ProposeError {}
 
+/// Error when requesting a linearizable read index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadIndexError {
+    /// This node is not the leader.
+    NotLeader { leader_hint: Option<NodeId> },
+    /// The leader has not committed an entry from its current term yet.
+    CurrentTermNotCommitted,
+    /// A previous read-index quorum round is still pending.
+    ReadInProgress { read_index: LogIndex },
+}
+
+impl fmt::Display for ReadIndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotLeader { leader_hint: Some(id) } => write!(f, "not leader, try {id}"),
+            Self::NotLeader { leader_hint: None } => write!(f, "not leader, leader unknown"),
+            Self::CurrentTermNotCommitted => {
+                write!(f, "leader has not committed an entry from its current term")
+            }
+            Self::ReadInProgress { read_index } => {
+                write!(f, "read-index quorum round pending at index {read_index}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReadIndexError {}
+
 /// Error when transferring leadership.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferError {

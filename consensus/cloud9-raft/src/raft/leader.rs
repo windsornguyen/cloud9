@@ -12,16 +12,18 @@
 //! - `match_index`: highest replicated index for each peer
 //! - `heartbeat_deadline`: when to send next heartbeat
 
-use crate::{Command, LogIndex, NodeId, TransferError};
+use std::collections::BTreeSet;
+
+use crate::{Command, LogIndex, NodeId, ReadIndexError, TransferError};
 
 use super::StepResult;
 use super::core::Core;
 use super::event::{
     AppendRequest, AppendResponse, Effects, Event, InstallSnapshotResponse, Message, Payload,
-    PreVoteResponse, SendSnapshot, VoteResponse,
+    PreVoteResponse, ReadIndexRequest, ReadIndexResponse, SendSnapshot, VoteResponse,
 };
 use super::log::{Entry, EntryPayload};
-use super::membership::{ConfigChange, ConfigChangeError};
+use super::membership::{ConfigChange, ConfigChangeError, Configuration};
 
 /// Result of processing committed config entries.
 enum ConfigCommitResult {
@@ -31,6 +33,14 @@ enum ConfigCommitResult {
     StepDown(Effects),
     /// No config changes, done.
     Done,
+}
+
+#[derive(Debug, Clone)]
+struct PendingReadIndex {
+    id: u64,
+    read_index: LogIndex,
+    configuration: Configuration,
+    acks: BTreeSet<NodeId>,
 }
 
 /// Leader role state.
@@ -45,6 +55,12 @@ pub struct Leader {
     /// Highest index we've sent to each peer (for pipelining).
     /// When pipelining is enabled, this tracks what's in-flight.
     sent_index: std::collections::BTreeMap<NodeId, LogIndex>,
+    /// Monotonic id for read-index quorum rounds.
+    next_read_id: u64,
+    /// Read-index quorum round waiting for follower confirmations.
+    pending_read_index: Option<PendingReadIndex>,
+    /// Highest read index confirmed by a quorum after the read was requested.
+    confirmed_read_index: LogIndex,
 }
 
 impl Leader {
@@ -74,6 +90,9 @@ impl Leader {
             match_index,
             heartbeat_deadline: core.ticks + core.config.heartbeat_interval,
             sent_index,
+            next_read_id: 1,
+            pending_read_index: None,
+            confirmed_read_index: 0,
         };
 
         // Send initial heartbeats
@@ -87,42 +106,84 @@ impl Leader {
         self.heartbeat_deadline.saturating_sub(ticks)
     }
 
-    /// Check if this leader can serve linearizable reads (§6.4).
-    ///
-    /// Per §6.4: "First, a leader must have the latest information on which
-    /// entries are committed. [...] Raft handles this by having each leader
-    /// commit a blank no-op entry into the log at the start of its term."
-    ///
-    /// Returns true if the leader has committed at least one entry from the
-    /// current term (meaning it knows the true commit index).
-    ///
-    /// After this returns true, the I/O layer should:
-    /// 1. Record `read_index()` as the read index
-    /// 2. Send a heartbeat round and wait for majority ack (confirms leadership)
-    /// 3. Wait for state machine to reach read index
-    /// 4. Execute the read
+    /// Check if this leader can serve a read at its current commit index (§6.4).
     pub fn can_serve_reads(&self, core: &Core) -> bool {
-        // Check if any committed entry is from current term
+        Self::current_term_commit_index(core).is_some()
+            && self.confirmed_read_index >= core.commit_index
+            && core.last_applied >= core.commit_index
+    }
+
+    /// Get the highest read index confirmed by a quorum.
+    #[inline]
+    pub fn read_index(&self, _core: &Core) -> LogIndex {
+        self.confirmed_read_index
+    }
+
+    /// Check whether a requested read index is confirmed and applied.
+    pub fn read_index_ready(&self, core: &Core, read_index: LogIndex) -> bool {
+        self.confirmed_read_index >= read_index && core.last_applied >= read_index
+    }
+
+    /// Start a read-index quorum round (§6.4).
+    pub fn request_read_index(
+        &mut self,
+        core: &Core,
+    ) -> Result<(LogIndex, Effects), ReadIndexError> {
+        if let Some(pending) = &self.pending_read_index {
+            return Err(ReadIndexError::ReadInProgress { read_index: pending.read_index });
+        }
+
+        if Self::current_term_commit_index(core).is_none() {
+            return Err(ReadIndexError::CurrentTermNotCommitted);
+        }
+
+        let read_index = core.commit_index;
+        let id = self.next_read_id;
+        self.next_read_id += 1;
+
+        let pending = PendingReadIndex {
+            id,
+            read_index,
+            configuration: core.effective_config(),
+            acks: BTreeSet::from([core.id()]),
+        };
+
+        if pending.configuration.has_quorum(|voter| pending.acks.contains(&voter)) {
+            self.confirmed_read_index = self.confirmed_read_index.max(read_index);
+            return Ok((read_index, Effects::none()));
+        }
+
+        let effects = Self::read_index_requests(core, &pending);
+        self.pending_read_index = Some(pending);
+        Ok((read_index, effects))
+    }
+
+    fn read_index_requests(core: &Core, pending: &PendingReadIndex) -> Effects {
+        Effects::none().with_messages(pending.configuration.voter_peers(core.id()).map(|to| {
+            Message {
+                from: core.id(),
+                to,
+                term: core.term(),
+                payload: Payload::ReadIndexRequest(ReadIndexRequest {
+                    id: pending.id,
+                    read_index: pending.read_index,
+                }),
+            }
+        }))
+    }
+
+    fn current_term_commit_index(core: &Core) -> Option<LogIndex> {
         let term = core.term();
         for idx in (1..=core.commit_index).rev() {
             if core.log().term_at(idx) == term {
-                return true;
+                return Some(idx);
             }
             // Optimization: stop if we hit an older term (entries are in term order)
             if core.log().term_at(idx) < term {
                 break;
             }
         }
-        false
-    }
-
-    /// Get the current read index for linearizable reads (§6.4).
-    ///
-    /// Only valid after `can_serve_reads()` returns true. The I/O layer must
-    /// confirm leadership (via heartbeat majority) before using this index.
-    #[inline]
-    pub fn read_index(&self, core: &Core) -> LogIndex {
-        core.commit_index
+        None
     }
 
     /// Propose a command for replication.
@@ -304,6 +365,9 @@ impl Leader {
                     Payload::InstallSnapshotResponse(resp) => {
                         self.handle_install_snapshot_response(core, msg.from, resp)
                     }
+                    Payload::ReadIndexResponse(resp) => {
+                        self.handle_read_index_response(msg.from, resp)
+                    }
                     Payload::VoteRequest(_) => Self::handle_vote_request(core, msg.from),
                     _ => StepResult::none(),
                 }
@@ -335,7 +399,11 @@ impl Leader {
         core.ticks += 1;
         if core.ticks >= self.heartbeat_deadline {
             self.heartbeat_deadline = core.ticks + core.config.heartbeat_interval;
-            StepResult::stay(self.broadcast_append(core))
+            let mut effects = self.broadcast_append(core);
+            if let Some(pending) = &self.pending_read_index {
+                effects = effects.merge(Self::read_index_requests(core, pending));
+            }
+            StepResult::stay(effects)
         } else {
             StepResult::none()
         }
@@ -409,6 +477,27 @@ impl Leader {
             return StepResult::to_follower(None, effects);
         }
         StepResult::stay(effects)
+    }
+
+    fn handle_read_index_response(&mut self, from: NodeId, resp: ReadIndexResponse) -> StepResult {
+        let Some(pending) = &mut self.pending_read_index else {
+            return StepResult::none();
+        };
+        if !pending.configuration.is_voter(from) {
+            return StepResult::none();
+        }
+        if pending.id != resp.id || pending.read_index != resp.read_index {
+            return StepResult::none();
+        }
+
+        pending.acks.insert(from);
+        if pending.configuration.has_quorum(|voter| pending.acks.contains(&voter)) {
+            let read_index = pending.read_index;
+            self.confirmed_read_index = self.confirmed_read_index.max(read_index);
+            self.pending_read_index = None;
+        }
+
+        StepResult::none()
     }
 
     fn handle_vote_request(core: &Core, from: NodeId) -> StepResult {
@@ -1022,10 +1111,15 @@ mod tests {
 
         // Still can't serve reads - no current term entry committed
         assert!(!leader.can_serve_reads(&core));
+        let mut leader = leader;
+        assert!(matches!(
+            leader.request_read_index(&core),
+            Err(ReadIndexError::CurrentTermNotCommitted)
+        ));
     }
 
     #[test]
-    fn can_serve_reads_after_current_term_commit() {
+    fn can_serve_reads_after_current_term_commit_and_quorum() {
         // Use single-node cluster where propose commits immediately
         let config = Config::new(NodeId(0)).with_parallel_disk_write(false).with_pipelining(false);
         let mut single_core = Core::new(config, &[NodeId(0)]);
@@ -1037,14 +1131,145 @@ mod tests {
 
         // Propose commits immediately in single-node cluster
         single_leader.propose(&mut single_core, Command(vec![42]));
+        single_core.last_applied = 1;
 
-        // Now we can serve reads
+        let (read_index, effects) = single_leader.request_read_index(&single_core).unwrap();
+        assert_eq!(read_index, 1);
+        assert!(effects.messages.is_empty());
         assert!(single_leader.can_serve_reads(&single_core));
         assert_eq!(single_leader.read_index(&single_core), 1);
     }
 
     #[test]
-    fn read_index_returns_commit_index() {
+    fn read_index_waits_for_heartbeat_quorum() {
+        let (mut core, mut leader, _) = test_setup();
+        core.log_mut().append(Entry {
+            term: 1,
+            index: 1,
+            payload: EntryPayload::Command(Command(vec![1])),
+        });
+        core.commit_index = 1;
+        core.last_applied = 1;
+
+        assert!(!leader.can_serve_reads(&core));
+        let (read_index, effects) = leader.request_read_index(&core).unwrap();
+
+        assert_eq!(read_index, 1);
+        assert_eq!(effects.messages.len(), 2);
+        assert!(matches!(
+            effects.messages[0].payload,
+            Payload::ReadIndexRequest(ReadIndexRequest { id: 1, read_index: 1 })
+        ));
+        assert!(!leader.read_index_ready(&core, read_index));
+
+        let msg = Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 1,
+            payload: Payload::ReadIndexResponse(ReadIndexResponse { id: 1, read_index }),
+        };
+        leader.step(&mut core, Event::Message(msg));
+
+        assert!(leader.read_index_ready(&core, read_index));
+        assert!(leader.can_serve_reads(&core));
+    }
+
+    #[test]
+    fn stale_read_index_response_is_ignored() {
+        let (mut core, mut leader, _) = test_setup();
+        core.log_mut().append(Entry {
+            term: 1,
+            index: 1,
+            payload: EntryPayload::Command(Command(vec![1])),
+        });
+        core.commit_index = 1;
+        core.last_applied = 1;
+
+        let (read_index, _) = leader.request_read_index(&core).unwrap();
+        let stale = Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 1,
+            payload: Payload::ReadIndexResponse(ReadIndexResponse { id: 99, read_index }),
+        };
+        leader.step(&mut core, Event::Message(stale));
+
+        assert!(!leader.read_index_ready(&core, read_index));
+    }
+
+    #[test]
+    fn pending_read_index_retries_on_heartbeat() {
+        let (mut core, mut leader, _) = test_setup();
+        core.log_mut().append(Entry {
+            term: 1,
+            index: 1,
+            payload: EntryPayload::Command(Command(vec![1])),
+        });
+        core.commit_index = 1;
+        core.last_applied = 1;
+
+        let (read_index, _) = leader.request_read_index(&core).unwrap();
+        leader.heartbeat_deadline = core.ticks;
+
+        let StepResult { effects, .. } = leader.step(&mut core, Event::Tick);
+        let retries = effects
+            .messages
+            .iter()
+            .filter(|msg| matches!(msg.payload, Payload::ReadIndexRequest(_)))
+            .count();
+
+        assert_eq!(retries, 2);
+        leader.step(
+            &mut core,
+            Event::Message(Message {
+                from: NodeId(1),
+                to: NodeId(0),
+                term: 1,
+                payload: Payload::ReadIndexResponse(ReadIndexResponse { id: 1, read_index }),
+            }),
+        );
+        assert!(leader.read_index_ready(&core, read_index));
+    }
+
+    #[test]
+    fn read_index_uses_request_configuration_for_quorum() {
+        let (mut core, mut leader, _) = test_setup();
+        core.log_mut().append(Entry {
+            term: 1,
+            index: 1,
+            payload: EntryPayload::Command(Command(vec![1])),
+        });
+        core.commit_index = 1;
+        core.last_applied = 1;
+
+        let (read_index, _) = leader.request_read_index(&core).unwrap();
+        core.log_mut().append(Entry {
+            term: 1,
+            index: 2,
+            payload: EntryPayload::Config(Configuration::simple([
+                NodeId(0),
+                NodeId(1),
+                NodeId(2),
+                NodeId(3),
+            ])),
+        });
+
+        assert!(core.effective_config().is_voter(NodeId(3)));
+        leader.step(
+            &mut core,
+            Event::Message(Message {
+                from: NodeId(1),
+                to: NodeId(0),
+                term: 1,
+                payload: Payload::ReadIndexResponse(ReadIndexResponse { id: 1, read_index }),
+            }),
+        );
+
+        assert!(leader.read_index_ready(&core, read_index));
+    }
+
+    #[test]
+    fn read_index_returns_confirmed_index() {
         let config = Config::new(NodeId(0)).with_parallel_disk_write(false).with_pipelining(false);
         let mut core = Core::new(config, &[NodeId(0)]);
         core.persistent.term = 1;
@@ -1054,8 +1279,11 @@ mod tests {
         leader.propose(&mut core, Command(vec![1]));
         leader.propose(&mut core, Command(vec![2]));
         leader.propose(&mut core, Command(vec![3]));
+        core.last_applied = 3;
 
         assert_eq!(core.commit_index, 3);
+        let (read_index, _) = leader.request_read_index(&core).unwrap();
+        assert_eq!(read_index, 3);
         assert_eq!(leader.read_index(&core), 3);
     }
 }

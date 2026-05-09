@@ -81,7 +81,8 @@ pub use candidate::Candidate;
 pub use core::{Config, Core, Persistent};
 pub use event::{
     AppendRequest, AppendResponse, Effects, Event, InstallSnapshotRequest, InstallSnapshotResponse,
-    Message, Payload, PreVoteRequest, PreVoteResponse, SendSnapshot, VoteRequest, VoteResponse,
+    Message, Payload, PreVoteRequest, PreVoteResponse, ReadIndexRequest, ReadIndexResponse,
+    SendSnapshot, VoteRequest, VoteResponse,
 };
 pub use follower::Follower;
 pub use leader::Leader;
@@ -89,7 +90,9 @@ pub use log::{Entry, EntryPayload, Log};
 pub use membership::{ConfigChange, ConfigChangeError, Configuration, Members, MembershipMode};
 pub use precandidate::PreCandidate;
 
-use crate::{Command, CommittedEntry, LogIndex, NodeId, ProposeError, TransferError};
+use crate::{
+    Command, CommittedEntry, LogIndex, NodeId, ProposeError, ReadIndexError, TransferError,
+};
 
 /// Role transition result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +301,22 @@ impl RaftNode {
                 Ok((index, effects))
             }
             _ => Err(ProposeError::NotLeader { leader_hint: self.leader() }),
+        }
+    }
+
+    /// Start a linearizable read-index quorum round (leader only).
+    pub fn request_read_index(&mut self) -> Result<(LogIndex, Effects), ReadIndexError> {
+        match &mut self.role {
+            RoleState::Leader(leader) => leader.request_read_index(&self.core),
+            _ => Err(ReadIndexError::NotLeader { leader_hint: self.leader() }),
+        }
+    }
+
+    /// Whether a previously requested read index is confirmed and applied.
+    pub fn read_index_ready(&self, read_index: LogIndex) -> bool {
+        match &self.role {
+            RoleState::Leader(leader) => leader.read_index_ready(&self.core, read_index),
+            _ => false,
         }
     }
 
