@@ -96,6 +96,7 @@ use crate::{Command, CommittedEntry, LogIndex, NodeId, ProposeError, TransferErr
 pub enum Transition {
     Stay,
     ToFollower(Option<NodeId>),
+    ToFollowerAfterContact(Option<NodeId>),
     ToPreCandidate,
     ToCandidate,
     ToLeader,
@@ -119,6 +120,10 @@ impl StepResult {
 
     pub fn to_follower(leader: Option<NodeId>, effects: Effects) -> Self {
         Self { transition: Transition::ToFollower(leader), effects }
+    }
+
+    pub fn to_follower_after_contact(leader: Option<NodeId>, effects: Effects) -> Self {
+        Self { transition: Transition::ToFollowerAfterContact(leader), effects }
     }
 
     pub fn to_precandidate(effects: Effects) -> Self {
@@ -382,6 +387,11 @@ impl RaftNode {
             Transition::Stay => Effects::none(),
             Transition::ToFollower(leader) => {
                 let follower = Follower::new(&mut self.core, leader);
+                self.role = RoleState::Follower(follower);
+                Effects::none()
+            }
+            Transition::ToFollowerAfterContact(leader) => {
+                let follower = Follower::after_leader_contact(&mut self.core, leader);
                 self.role = RoleState::Follower(follower);
                 Effects::none()
             }
@@ -1357,9 +1367,10 @@ mod tests {
         // Should be follower now
         assert!(node.role.is_follower());
 
-        // Effects should be minimal: persist (term changed) + response
+        // Effects should be minimal: persist term without acknowledging
+        // AppendEntries before the follower consistency check runs.
         assert!(effects.persist, "term change requires persist");
-        assert_eq!(effects.messages.len(), 1, "only response needed");
+        assert!(effects.messages.is_empty(), "must not ack unprocessed append");
     }
 
     // --- Dissertation Invariants & Efficiency Tests --------------------------
@@ -1602,6 +1613,49 @@ mod tests {
 
         // Term should NOT have jumped to 100 (we ignored it due to active leader)
         assert_eq!(node.term(), 1, "term should not inflate from disruptive vote request");
+    }
+
+    #[test]
+    fn higher_term_append_hint_does_not_activate_leader_guard() {
+        let config = test_config(NodeId(0));
+        let mut node = RaftNode::new(config, THREE_VOTERS);
+        node.core.persistent.term = 1;
+        node.core.log_mut().append(Entry {
+            term: 1,
+            index: 1,
+            payload: EntryPayload::Command(Command(vec![1])),
+        });
+        let (candidate, _) = Candidate::new(&mut node.core);
+        node.role = RoleState::Candidate(candidate);
+
+        node.step(Message {
+            from: NodeId(1),
+            to: NodeId(0),
+            term: 3,
+            payload: Payload::AppendRequest(AppendRequest {
+                prev_log_index: 1,
+                prev_log_term: 99,
+                entries: vec![],
+                leader_commit: 0,
+            }),
+        });
+
+        assert!(node.is_follower());
+        assert_eq!(node.leader(), Some(NodeId(1)));
+
+        let effects = node.step(Message {
+            from: NodeId(2),
+            to: NodeId(0),
+            term: 4,
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 1, last_log_term: 1 }),
+        });
+
+        assert_eq!(node.term(), 4);
+        assert_eq!(node.core.persistent.voted_for, Some(NodeId(2)));
+        assert!(matches!(
+            effects.messages[0].payload,
+            Payload::VoteResponse(VoteResponse { granted: true })
+        ));
     }
 
     /// Persistence flag not set for read-only operations.

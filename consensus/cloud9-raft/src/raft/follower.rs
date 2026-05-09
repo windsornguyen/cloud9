@@ -27,15 +27,21 @@ pub struct Follower {
     /// Tick at which to start an election.
     pub election_deadline: u64,
     /// Tick when we last heard from a leader (for disruptive-vote guard).
-    pub last_contact_tick: u64,
+    pub last_contact_tick: Option<u64>,
 }
 
 impl Follower {
     /// Create a new follower with a random election deadline.
     pub fn new(core: &mut Core, leader: Option<NodeId>) -> Self {
         let timeout = core.random_election_timeout();
-        let initial_contact = core.ticks.saturating_sub(core.config.election_timeout.0);
-        Self { leader, election_deadline: core.ticks + timeout, last_contact_tick: initial_contact }
+        Self { leader, election_deadline: core.ticks + timeout, last_contact_tick: None }
+    }
+
+    /// Create a follower after processing a leader-contacting RPC.
+    pub fn after_leader_contact(core: &mut Core, leader: Option<NodeId>) -> Self {
+        let mut follower = Self::new(core, leader);
+        follower.last_contact_tick = Some(core.ticks);
+        follower
     }
 
     /// Ticks until election timeout.
@@ -119,8 +125,9 @@ impl Follower {
         req: VoteRequest,
     ) -> StepResult {
         let dominated = core.log_is_up_to_date(req.last_log_term, req.last_log_index);
+        let candidate_is_voter = core.effective_config().is_voter(from);
         let can_vote = core.can_vote_for(from);
-        let granted = can_vote && dominated;
+        let granted = candidate_is_voter && can_vote && dominated;
 
         let mut effects = Effects::none();
         if granted {
@@ -298,8 +305,9 @@ impl Follower {
         // 1. Candidate's next_term is greater than our term
         // 2. Candidate's log is at least as up-to-date as ours
         let dominated = core.log_is_up_to_date(req.last_log_term, req.last_log_index);
+        let candidate_is_voter = core.effective_config().is_voter(from);
         let term_ok = req.next_term > core.term();
-        let granted = term_ok && dominated;
+        let granted = candidate_is_voter && term_ok && dominated;
 
         Effects::none().with_message(Message {
             from: core.id(),
@@ -313,8 +321,11 @@ impl Follower {
         if self.leader.is_none() {
             return false;
         }
+        let Some(last_contact_tick) = self.last_contact_tick else {
+            return false;
+        };
         let min_timeout = core.config.election_timeout.0;
-        core.ticks.saturating_sub(self.last_contact_tick) < min_timeout
+        core.ticks.saturating_sub(last_contact_tick) < min_timeout
     }
 
     fn reset_deadline(&mut self, core: &mut Core) {
@@ -323,7 +334,7 @@ impl Follower {
     }
 
     fn record_contact(&mut self, core: &Core) {
-        self.last_contact_tick = core.ticks;
+        self.last_contact_tick = Some(core.ticks);
     }
 }
 
@@ -385,6 +396,51 @@ mod tests {
 
         if let Payload::VoteResponse(resp) = &effects.messages[0].payload {
             assert!(resp.granted);
+        } else {
+            panic!("expected VoteResponse");
+        }
+    }
+
+    #[test]
+    fn denies_vote_to_candidate_outside_config() {
+        let config = Config::new(NodeId(0)).with_prevote(false);
+        let mut core = Core::new(config, &[NodeId(0), NodeId(1)]);
+        core.persistent.term = 1;
+        let mut follower = Follower::new(&mut core, None);
+
+        let msg = Message {
+            from: NodeId(2),
+            to: NodeId(0),
+            term: 2,
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
+        };
+
+        let StepResult { effects, .. } = follower.step(&mut core, Event::Message(msg));
+        assert_ne!(core.persistent.voted_for, Some(NodeId(2)));
+        if let Payload::VoteResponse(resp) = &effects.messages[0].payload {
+            assert!(!resp.granted);
+        } else {
+            panic!("expected VoteResponse");
+        }
+    }
+
+    #[test]
+    fn follower_with_known_leader_rejects_disruptive_vote() {
+        let (mut core, _) = test_setup();
+        core.persistent.term = 1;
+        let mut follower = Follower::after_leader_contact(&mut core, Some(NodeId(1)));
+
+        let msg = Message {
+            from: NodeId(2),
+            to: NodeId(0),
+            term: 2,
+            payload: Payload::VoteRequest(VoteRequest { last_log_index: 0, last_log_term: 0 }),
+        };
+
+        let StepResult { effects, .. } = follower.step(&mut core, Event::Message(msg));
+        assert_eq!(core.term(), 1);
+        if let Payload::VoteResponse(resp) = &effects.messages[0].payload {
+            assert!(!resp.granted);
         } else {
             panic!("expected VoteResponse");
         }
