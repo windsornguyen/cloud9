@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.91.0"
+rust-version = "1.95.0"
 license = "MIT"
 authors = ["Windsor Nguyen <oss@dedaluslabs.ai>"]
 repository = "https://github.com/dedalus-labs/cloud9"

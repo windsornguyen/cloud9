@@ -59,6 +59,9 @@ pbft = "pbft"
 poa = "poa"
 pos = "pos"
 
+# File formats
+edn = "edn"
+
 [type.rust]
 extend-glob = ["*.rs"]
 
