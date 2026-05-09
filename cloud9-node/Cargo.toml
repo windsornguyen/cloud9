@@ -12,9 +12,14 @@ homepage = { workspace = true }
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
 cloud9-core = { workspace = true }
 cloud9-raft = { workspace = true }
 cloud9-storage = { workspace = true }
 cloud9-proto = { workspace = true }
+connectrpc = { workspace = true, features = ["axum"] }
 tracing = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
