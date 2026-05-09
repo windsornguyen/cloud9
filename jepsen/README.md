@@ -40,14 +40,16 @@ Useful knobs:
 
 ```bash
 lein run test --help
+lein run test --nodes-file ~/nodes --username root --time-limit 60 --concurrency 5n --nemesis-mode kill-leader
 lein run serve
 ```
 
-The harness discovers the current Raft leader before opening client sessions.
-Followers reject mutating KV RPCs rather than serving node-local state.
+The harness discovers the current Raft leader before opening client sessions and
+rediscovers it after failover. Followers reject mutating KV RPCs rather than
+serving node-local state.
 
 ## Current Limit
 
 `c9 start` now drives KV commands through Raft, but this is still a transient
-runtime: Raft persistence, snapshot transfer, read forwarding, failover-aware
-clients, and nemesis coverage are intentionally not complete yet.
+runtime: Raft persistence, snapshot transfer, read forwarding, and richer nemesis
+coverage are intentionally not complete yet.

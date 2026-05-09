@@ -10,7 +10,9 @@
                     [control :as c]
                     [db :as db]
                     [generator :as gen]
+                    [history :as h]
                     [independent :as independent]
+                    [nemesis :as nemesis]
                     [random :as rand]
                     [tests :as tests]]
             [jepsen.control.util :as cu]
@@ -196,9 +198,14 @@
   [sequence]
   (str (swap! sequence inc)))
 
+(declare with-leader-retry!)
+
 (defn register-session!
-  [test node]
-  (:clientId (rpc! test node "RegisterSession" {})))
+  [test leader]
+  (:clientId
+   (with-leader-retry! test leader
+     (fn [node]
+       (rpc! test node "RegisterSession" {})))))
 
 (defn status!
   [test node]
@@ -226,24 +233,72 @@
         (throw+ {:type    ::no-leader
                  :message "no Cloud9 Raft leader elected"})))))
 
-(defn get-value!
-  [test node k]
-  (rpc! test node "Get" {:namespace kv-namespace
-                         :key       (kv-key k)}))
+(defn not-leader?
+  [e]
+  (and (= 400 (:status e))
+       (str/includes? (str (:body e)) "not leader")))
 
-(defn put-value!
-  [test node session sequence k value preconditions]
+(defn recoverable-rpc-error?
+  [e]
+  (or (nil? (:status e))
+      (#{408 500 502 503 504} (:status e))
+      (not-leader? e)))
+
+(defrecord ClientOnlyChecker [checker]
+  checker/Checker
+  (check [_ test history opts]
+    (checker/check checker test (h/filter #(not= :nemesis (:process %)) history) opts)))
+
+(defn client-only
+  [checker]
+  (ClientOnlyChecker. checker))
+
+(defn with-leader-retry!
+  [test leader f]
+  (loop [attempts 20]
+    (let [node (or @leader (await-leader! test))
+          result (try+
+                   {:type ::ok
+                    :value (f node)}
+                   (catch [:type ::rpc-error] e
+                     {:type ::error
+                      :error e}))]
+      (if (= ::ok (:type result))
+        (:value result)
+        (let [error (:error result)]
+          (if (and (pos? attempts) (recoverable-rpc-error? error))
+            (do
+              (reset! leader nil)
+              (recur (dec attempts)))
+            (throw+ error)))))))
+
+(defn get-value!
+  [test leader k]
+  (with-leader-retry! test leader
+    (fn [node]
+      (rpc! test node "Get" {:namespace kv-namespace
+                             :key       (kv-key k)}))))
+
+(defn put-value-with-sequence!
+  [test node session op-sequence k value preconditions]
   (rpc! test node "Put" (merge {:clientId session
-                                :sequence (next-sequence! sequence)
+                                :sequence op-sequence
                                 :namespace kv-namespace
                                 :key      (kv-key k)
                                 :body     (encode-value value)}
                                preconditions)))
 
+(defn put-value!
+  [test leader session sequence k value preconditions]
+  (let [op-sequence (next-sequence! sequence)]
+    (with-leader-retry! test leader
+      (fn [node]
+        (put-value-with-sequence! test node session op-sequence k value preconditions)))))
+
 (defn read-op
-  [test node op k]
+  [test leader op k]
   (try+
-    (let [entry (get-value! test node k)]
+    (let [entry (get-value! test leader k)]
       (assoc op
              :type :ok
              :value (independent/tuple k (decode-value (:body entry)))))
@@ -253,40 +308,47 @@
         (throw+ e)))))
 
 (defn cas-op
-  [test node session sequence op k from to]
+  [test leader session sequence op k from to]
   (try+
     (if (nil? from)
-      (do (put-value! test node session sequence k to {:ifNoneMatch true})
+      (do (put-value! test leader session sequence k to {:ifNoneMatch true})
           (assoc op :type :ok))
-      (let [entry (get-value! test node k)]
+      (let [entry (get-value! test leader k)]
         (if (not= from (decode-value (:body entry)))
           (assoc op :type :fail)
-          (do (put-value! test node session sequence k to {:ifMatch (:etag entry)})
+          (do (put-value! test leader session sequence k to {:ifMatch (:etag entry)})
               (assoc op :type :ok)))))
     (catch [:type ::rpc-error] e
       (if (#{400 404 409 412} (:status e))
         (assoc op :type :fail)
         (throw+ e)))))
 
-(defrecord KvClient [node session sequence]
+(defrecord KvClient [leader session sequence]
   client/Client
   (open! [this test node]
-    (let [leader (await-leader! test)]
+    (let [leader (atom (await-leader! test))]
       (assoc this
-           :node leader
-           :session (register-session! test leader)
-           :sequence (atom 0))))
+             :leader leader
+             :session (register-session! test leader)
+             :sequence (atom 0))))
 
   (setup! [_ _test])
 
   (invoke! [_ test op]
-    (let [[k value] (:value op)]
-      (case (:f op)
-        :read  (read-op test node op k)
-        :write (do (put-value! test node session sequence k value {})
-                   (assoc op :type :ok))
-        :cas   (let [[from to] value]
-                 (cas-op test node session sequence op k from to)))))
+    (try+
+      (let [[k value] (:value op)]
+        (case (:f op)
+          :read  (read-op test leader op k)
+          :write (do (put-value! test leader session sequence k value {})
+                     (assoc op :type :ok))
+          :cas   (let [[from to] value]
+                   (cas-op test leader session sequence op k from to))))
+      (catch [:type ::no-leader] e
+        (assoc op :type :info :error e))
+      (catch [:type ::rpc-error] e
+        (if (recoverable-rpc-error? e)
+          (assoc op :type :info :error e)
+          (throw+ e)))))
 
   (teardown! [_ _test])
 
@@ -296,18 +358,51 @@
   (reusable? [_ _test]
     true))
 
+(defn kill-leader-nemesis
+  []
+  (nemesis/node-start-stopper
+    (fn [test _nodes]
+      (current-leader test))
+    (fn [test node]
+      (db/kill! (:db test) test node)
+      [:killed node])
+    (fn [test node]
+      (db/start! (:db test) test node)
+      [:started node])))
+
+(defn nemesis-generator
+  [opts]
+  (case (:nemesis-mode opts)
+    "none" nil
+    "kill-leader" (->> (cycle [{:f :start} {:f :stop}])
+                       (gen/stagger (:nemesis-interval opts)))
+    (throw+ {:type ::unknown-nemesis
+             :nemesis-mode (:nemesis-mode opts)})))
+
+(defn test-nemesis
+  [opts]
+  (case (:nemesis-mode opts)
+    "none" (:nemesis tests/noop-test)
+    "kill-leader" (kill-leader-nemesis)
+    (throw+ {:type ::unknown-nemesis
+             :nemesis-mode (:nemesis-mode opts)})))
+
 (defn kv-workload
   [opts]
-  {:checker   (independent/checker
-                (checker/compose
-                  {:linearizable (checker/linearizable
-                                   {:model (model/cas-register)})
-                   :timeline     (timeline/html)}))
-   :client    (KvClient. nil nil nil)
-   :generator (cond->> (gen/clients
-                         (gen/mix [register-read register-write register-cas register-cas]))
-                (pos? (:stagger opts)) (gen/stagger (:stagger opts))
-                (:time-limit opts) (gen/time-limit (:time-limit opts)))})
+  (let [client-gen (cond->> (gen/mix [register-read register-write register-cas register-cas])
+                     (pos? (:stagger opts)) (gen/stagger (:stagger opts)))
+        nemesis-gen (nemesis-generator opts)]
+    {:checker   (checker/compose
+                  {:linearizable (client-only
+                                   (independent/checker
+                                     (checker/linearizable
+                                       {:model (model/cas-register)})))
+                   :timeline     (timeline/html)})
+     :client    (KvClient. nil nil nil)
+     :generator (cond->> (if nemesis-gen
+                           (gen/clients client-gen nemesis-gen)
+                           (gen/clients client-gen))
+                  (:time-limit opts) (gen/time-limit (:time-limit opts)))}))
 
 (defn cloud9-test
   [opts]
@@ -317,7 +412,8 @@
          {:name            "cloud9 db"
           :pure-generators true
           :os              debian/os
-          :db              (cloud9-db)}))
+          :db              (cloud9-db)
+          :nemesis         (test-nemesis opts)}))
 
 (def cli-opts
   [[nil "--binary PATH" "Local c9 binary to upload"
@@ -331,6 +427,11 @@
     :parse-fn parse-long]
    [nil "--stagger SECONDS" "Average seconds between generated operations"
     :default 0.01
+    :parse-fn parse-double]
+   [nil "--nemesis-mode NAME" "Nemesis mode: none or kill-leader"
+    :default "none"]
+   [nil "--nemesis-interval SECONDS" "Average seconds between nemesis operations"
+    :default 2
     :parse-fn parse-double]])
 
 (defn -main
