@@ -58,6 +58,10 @@ pub enum Payload {
     InstallSnapshotRequest(InstallSnapshotRequest),
     /// `InstallSnapshot` response
     InstallSnapshotResponse(InstallSnapshotResponse),
+    /// Read-index heartbeat request (§6.4).
+    ReadIndexRequest(ReadIndexRequest),
+    /// Read-index heartbeat response (§6.4).
+    ReadIndexResponse(ReadIndexResponse),
     /// Leadership transfer: target should start election immediately (§3.10)
     TimeoutNow,
 }
@@ -105,6 +109,18 @@ pub struct AppendRequest {
 pub struct AppendResponse {
     pub success: bool,
     pub last_log_index: LogIndex,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ReadIndexRequest {
+    pub id: u64,
+    pub read_index: LogIndex,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ReadIndexResponse {
+    pub id: u64,
+    pub read_index: LogIndex,
 }
 
 /// `InstallSnapshot` request (§5, Figure 5.3).

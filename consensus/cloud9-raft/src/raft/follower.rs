@@ -15,7 +15,8 @@ use super::StepResult;
 use super::core::Core;
 use super::event::{
     AppendRequest, AppendResponse, Effects, Event, InstallSnapshotRequest, InstallSnapshotResponse,
-    Message, Payload, PreVoteRequest, PreVoteResponse, VoteRequest, VoteResponse,
+    Message, Payload, PreVoteRequest, PreVoteResponse, ReadIndexRequest, ReadIndexResponse,
+    VoteRequest, VoteResponse,
 };
 use super::log::Entry;
 
@@ -76,7 +77,10 @@ impl Follower {
                 if msg.term > core.term() {
                     term_updated = core.maybe_update_term(msg.term);
                     self.reset_deadline(core);
-                    if matches!(msg.payload, Payload::AppendRequest(_)) {
+                    if matches!(
+                        msg.payload,
+                        Payload::AppendRequest(_) | Payload::ReadIndexRequest(_)
+                    ) {
                         self.leader = Some(msg.from);
                     }
                 }
@@ -89,6 +93,9 @@ impl Follower {
                 let StepResult { transition, mut effects } = match msg.payload {
                     Payload::VoteRequest(req) => self.handle_vote_request(core, msg.from, req),
                     Payload::AppendRequest(req) => self.handle_append_request(core, msg.from, &req),
+                    Payload::ReadIndexRequest(req) => {
+                        self.handle_read_index_request(core, msg.from, req)
+                    }
                     Payload::InstallSnapshotRequest(req) => {
                         self.handle_install_snapshot(core, msg.from, req)
                     }
@@ -210,6 +217,29 @@ impl Follower {
         StepResult::stay(effects.with_message(resp))
     }
 
+    /// Handle read-index heartbeat request (§6.4).
+    fn handle_read_index_request(
+        &mut self,
+        core: &mut Core,
+        from: NodeId,
+        req: ReadIndexRequest,
+    ) -> StepResult {
+        self.leader = Some(from);
+        self.record_contact(core);
+        self.reset_deadline(core);
+
+        let resp = Message {
+            from: core.id(),
+            to: from,
+            term: core.term(),
+            payload: Payload::ReadIndexResponse(ReadIndexResponse {
+                id: req.id,
+                read_index: req.read_index,
+            }),
+        };
+        StepResult::stay(Effects::none().with_message(resp))
+    }
+
     /// Handle `InstallSnapshot` RPC (§5, Figure 5.3).
     ///
     /// Per Figure 5.3 receiver implementation:
@@ -293,6 +323,10 @@ impl Follower {
             Payload::AppendRequest(_) => Payload::AppendResponse(AppendResponse {
                 success: false,
                 last_log_index: core.log().last_index(),
+            }),
+            Payload::ReadIndexRequest(req) => Payload::ReadIndexResponse(ReadIndexResponse {
+                id: req.id,
+                read_index: req.read_index,
             }),
             _ => return Effects::none(),
         };
