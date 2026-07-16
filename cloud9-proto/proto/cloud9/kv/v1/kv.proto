@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package cloud9.kv.v1;
+
+// KvService is Cloud9's first implemented source dialect. The target
+// architecture lowers it through the shared transaction IR into point storage.
+service KvService {
+  // RegisterSession allocates a client id for idempotent mutating requests.
+  rpc RegisterSession(RegisterSessionRequest) returns (RegisterSessionResponse);
+
+  // Head returns value metadata without the value body.
+  rpc Head(HeadRequest) returns (HeadResponse);
+
+  // Get returns value metadata and body.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Put creates or replaces a value, subject to optional ETag preconditions.
+  rpc Put(PutRequest) returns (PutResponse);
+
+  // Delete deletes a value, subject to optional ETag preconditions.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Status returns node-local service status.
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+message RegisterSessionRequest {}
+
+message RegisterSessionResponse {
+  uint64 client_id = 1;
+}
+
+message HeadRequest {
+  string namespace = 1;
+  string key = 2;
+}
+
+message HeadResponse {
+  string namespace = 1;
+  string key = 2;
+  string etag = 3;
+  uint64 generation = 4;
+  uint64 size = 5;
+}
+
+message GetRequest {
+  string namespace = 1;
+  string key = 2;
+}
+
+message GetResponse {
+  string namespace = 1;
+  string key = 2;
+  string etag = 3;
+  uint64 generation = 4;
+  uint64 size = 5;
+  bytes body = 6;
+}
+
+message PutRequest {
+  uint64 client_id = 1;
+  uint64 sequence = 2;
+  string namespace = 3;
+  string key = 4;
+  bytes body = 5;
+  string if_match = 6;
+  bool if_none_match = 7;
+}
+
+message PutResponse {
+  string namespace = 1;
+  string key = 2;
+  string etag = 3;
+  uint64 generation = 4;
+  uint64 size = 5;
+}
+
+message DeleteRequest {
+  uint64 client_id = 1;
+  uint64 sequence = 2;
+  string namespace = 3;
+  string key = 4;
+  string if_match = 5;
+}
+
+message DeleteResponse {
+  string namespace = 1;
+  string key = 2;
+  string etag = 3;
+  uint64 generation = 4;
+  bool deleted = 5;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  uint64 node_id = 1;
+  string mode = 2;
+  uint64 key_count = 3;
+}

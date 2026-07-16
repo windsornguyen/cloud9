@@ -1,19 +1,24 @@
+#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 //! Top-level orchestration for Cloud9 nodes.
 
-use cloud9_raft::ConsensusConfig;
-use cloud9_storage::StorageOptions;
-use tracing::{info, instrument};
+mod auth;
+mod command;
+mod config;
+mod runtime;
+mod service;
+mod store;
+#[cfg(test)]
+mod tests;
+mod transport;
 
-/// Runtime configuration derived from CLI flags and config files.
-#[derive(Debug, Clone, Default)]
-pub struct NodeConfig {
-    pub storage: StorageOptions,
-    pub consensus: ConsensusConfig,
-}
+pub use auth::RaftKey;
+pub use config::{NodeConfig, raft_config};
 
-/// Launch the storage and consensus subsystems.
-#[instrument(skip_all)]
-pub async fn launch(config: NodeConfig) {
-    info!(?config.storage, "initializing storage");
-    info!(?config.consensus, "consensus subsystem ready");
+/// Launch the node's public KV API and Raft peer API.
+pub async fn launch(config: NodeConfig) -> anyhow::Result<()> {
+    service::launch(config).await
 }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["cloud9", "cloud9-core", "cloud9-node", "cloud9-proto", "cloud9-storage", "consensus/cloud9-raft", "consensus/cloud9-raft-io"]
+members = ["cloud9", "cloud9-core", "cloud9-node", "cloud9-proto", "cloud9-storage", "cloud9-wal", "consensus/cloud9-raft", "consensus/cloud9-raft-io"]
 resolver = "2"
 
 [workspace.package]
@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.95.0"
 license = "MIT"
 authors = ["Windsor Nguyen <oss@dedaluslabs.ai>"]
-repository = "https://github.com/dedalus-labs/cloud9"
+repository = "https://github.com/windsornguyen/cloud9"
 homepage = "https://dedaluslabs.ai"
 
 [workspace.lints.rust]
@@ -43,12 +43,13 @@ unimplemented = "warn"
 
 [workspace.dependencies]
 # Internal crates
-cloud9-core = { path = "cloud9-core" }
-cloud9-storage = { path = "cloud9-storage" }
-cloud9-raft = { path = "consensus/cloud9-raft" }
-cloud9-raft-io = { path = "consensus/cloud9-raft-io" }
-cloud9-proto = { path = "cloud9-proto" }
-cloud9-node = { path = "cloud9-node" }
+cloud9-core = { version = "0.0.1", path = "cloud9-core" }
+cloud9-storage = { version = "0.0.1", path = "cloud9-storage" }
+cloud9-wal = { version = "0.0.1", path = "cloud9-wal" }
+cloud9-raft = { version = "0.0.1", path = "consensus/cloud9-raft" }
+cloud9-raft-io = { version = "0.0.1", path = "consensus/cloud9-raft-io" }
+cloud9-proto = { version = "0.0.1", path = "cloud9-proto" }
+cloud9-node = { version = "0.0.1", path = "cloud9-node" }
 
 # External dependencies
 anyhow = "1"
@@ -57,13 +58,22 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "io-util"] }
 axum = "0.8.6"
 clap = { version = "4.5", features = ["derive", "env", "string", "wrap_help"] }
 arcstr = { version = "1.2", features = ["serde"] }
 fs-err = { version = "3", features = ["tokio"] }
 miette = { version = "7.2", features = ["fancy-no-backtrace"] }
 textwrap = "0.16"
+crc32fast = "1.5"
+toml = "0.9"
+buffa = { version = "0.5.2", features = ["json"] }
+connectrpc = { version = "0.4.2", default-features = false }
+connectrpc-build = "0.4.2"
+http-body = "1"
+hmac = "0.13"
+sha2 = "0.11"
 
 # Testing - concurrency
 loom = "0.7.2"
@@ -74,3 +84,4 @@ proptest-state-machine = "0.6"
 
 # Testing - concurrency (randomized)
 shuttle = "0.8"
+tempfile = "3.20"

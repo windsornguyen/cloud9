@@ -24,12 +24,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
 
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -45,10 +48,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
 
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -59,15 +65,43 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
+  jepsen:
+    name: Jepsen harness
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jepsen
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Leiningen
+        run: sudo apt-get update && sudo apt-get install --yes leiningen
+
+      - name: Check Jepsen harness
+        run: lein check
+
+      - name: Test Jepsen harness
+        run: lein test
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
 
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2

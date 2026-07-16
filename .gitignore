@@ -40,6 +40,11 @@ Thumbs.db
 # Node (commitlint)
 node_modules/
 package-lock.json
+jepsen/store/
+jepsen/target/
+jepsen/c9-linux-*
+jepsen/.lein-failures
+jepsen/.nrepl-port
 
 # LLM tooling
 **/.agent/

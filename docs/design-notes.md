@@ -1,4 +1,8 @@
-# Cloud9 Design Notes
+# Historical Cloud9 Design Notes
+
+> This document preserves early design discussion. It is not normative and
+> contains superseded decisions, including HLC-based timestamp guidance. Use
+> [the current specifications](../spec/README.md) for implementation.
 
 This document captures the theoretical foundations, architectural decisions, and market insights that define Cloud9.
 

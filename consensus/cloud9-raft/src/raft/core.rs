@@ -8,9 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{LogIndex, NodeId, Term};
+use crate::{Command, LogIndex, NodeId, Term};
 
-use super::log::Log;
+use super::log::{EntryPayload, Log};
 use super::membership::{Configuration, MembershipMode};
 
 /// Static configuration for a Raft node.
@@ -47,6 +47,10 @@ pub struct Config {
     pub heartbeat_interval: u64,
     /// Max entries per `AppendEntries` message.
     pub max_entries_per_msg: u64,
+    /// Max uncommitted log entries accepted by a leader.
+    pub max_uncommitted_entries: u64,
+    /// Max command bytes across uncommitted log entries.
+    pub max_uncommitted_bytes: u64,
     /// How to handle membership changes.
     pub membership_mode: MembershipMode,
     /// Enable `PreVote` protocol (§4.2.3).
@@ -90,6 +94,8 @@ impl Config {
             election_timeout: (150, 300),
             heartbeat_interval: 75,
             max_entries_per_msg: 100,
+            max_uncommitted_entries: 1024,
+            max_uncommitted_bytes: 64 * 1024 * 1024,
             membership_mode: MembershipMode::default(),
             prevote: true,
             parallel_disk_write: true,
@@ -222,6 +228,28 @@ impl Core {
     #[inline]
     pub fn log_mut(&mut self) -> &mut Log {
         &mut self.persistent.log
+    }
+
+    pub(crate) fn proposal_limit_exceeded(&self, command: &Command) -> bool {
+        let last_index = self.log().last_index();
+        assert!(self.commit_index <= last_index, "commit index cannot exceed the log");
+        let entries = self.log().slice(self.commit_index + 1, last_index);
+        let Ok(uncommitted_entries) = u64::try_from(entries.len()) else {
+            return true;
+        };
+        if uncommitted_entries >= self.config.max_uncommitted_entries {
+            return true;
+        }
+
+        entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                EntryPayload::Command(command) => Some(command.0.len()),
+                EntryPayload::Config(_) => None,
+            })
+            .chain([command.0.len()])
+            .try_fold(0_u64, |total, bytes| total.checked_add(u64::try_from(bytes).ok()?))
+            .is_none_or(|bytes| bytes > self.config.max_uncommitted_bytes)
     }
 
     /// Update term if the given term is higher. Returns true if term changed.
