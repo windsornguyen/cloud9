@@ -65,6 +65,31 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
+  jepsen:
+    name: Jepsen harness
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jepsen
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Leiningen
+        run: sudo apt-get update && sudo apt-get install --yes leiningen
+
+      - name: Check Jepsen harness
+        run: lein check
+
+      - name: Test Jepsen harness
+        run: lein test
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

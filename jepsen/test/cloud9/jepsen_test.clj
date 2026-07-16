@@ -34,13 +34,24 @@
 
 (deftest cas-failures-require-the-exact-connect-code
   (is (cloud9/expected-cas-failure? {:status 400
-                                     :body {:code "failed_precondition"}}))
+                                     :body {:code "failed_precondition"
+                                            :message "key already exists"}}))
+  (is (cloud9/expected-cas-failure? {:status 400
+                                     :body {:code "failed_precondition"
+                                            :message "ETag precondition failed"}}))
   (is (cloud9/expected-cas-failure? {:status 404
                                      :body {:code "not_found"}}))
+  (is (not (cloud9/expected-cas-failure? {:status 400
+                                          :body {:code "failed_precondition"
+                                                 :message "not leader"}})))
   (is (not (cloud9/expected-cas-failure? {:status 400
                                           :body {:code "invalid_argument"}})))
   (is (not (cloud9/expected-cas-failure? {:status 500
                                           :body {:code "failed_precondition"}}))))
+
+(deftest rpc-uses-http-kit-timeout-options
+  (is (= {:timeout 5000 :connect-timeout 5000 :idle-timeout 5000}
+         cloud9/rpc-timeouts)))
 
 (deftest workload-builds-with-and-without-the-nemesis
   (doseq [mode ["none" "kill-leader"]]
@@ -64,3 +75,12 @@
         result (checker/check (cloud9/->NoExceptionsChecker) {} events {})]
     (is (false? (:valid? result)))
     (is (= 1 (:count result)))))
+
+(deftest final-recovery-reads-must-succeed
+  (let [checker (cloud9/->RecoveryChecker)
+        unavailable (history/history [{:process 0 :type :invoke :f :read :final? true}
+                                      {:process 0 :type :info :f :read :final? true}])
+        recovered (history/history [{:process 0 :type :invoke :f :read :final? true}
+                                    {:process 0 :type :ok :f :read :final? true}])]
+    (is (false? (:valid? (checker/check checker {} unavailable {}))))
+    (is (true? (:valid? (checker/check checker {} recovered {}))))))

@@ -34,6 +34,9 @@
 (def kv-service "cloud9.kv.v1.KvService")
 (def kv-namespace "jepsen")
 (def raft-key "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+(def rpc-timeouts {:timeout         5000
+                   :connect-timeout 5000
+                   :idle-timeout    5000})
 
 (defn canonical-path
   [path]
@@ -143,10 +146,9 @@
 (defn rpc!
   [test node method body]
   (let [{:keys [status body error]} @(http/post (rpc-url test node method)
-                                                {:headers            {"content-type" "application/json"}
-                                                 :body               (json/generate-string body)
-                                                 :connection-timeout 5000
-                                                 :socket-timeout     5000})
+                                                (merge rpc-timeouts
+                                                       {:headers {"content-type" "application/json"}
+                                                        :body    (json/generate-string body)}))
         decoded (when-not (str/blank? body)
                   (json/parse-string body true))]
     (when error
@@ -189,6 +191,10 @@
   {:type  :invoke
    :f     :read
    :value (independent/tuple 0 nil)})
+
+(defn final-register-read
+  [test process]
+  (assoc (register-read test process) :final? true))
 
 (defn register-cas
   [_ _]
@@ -255,7 +261,9 @@
 (defn expected-cas-failure?
   [e]
   (or (and (= 400 (:status e))
-           (= "failed_precondition" (:code (:body e))))
+           (= "failed_precondition" (:code (:body e)))
+           (#{"key already exists" "ETag precondition failed"}
+            (:message (:body e))))
       (not-found? e)))
 
 (defrecord ClientOnlyChecker [checker]
@@ -274,6 +282,18 @@
       {:valid? (empty? exceptions)
        :count  (count exceptions)
        :example (first exceptions)})))
+
+(defrecord RecoveryChecker []
+  checker/Checker
+  (check [_ _test history _opts]
+    (let [finals (into [] (h/filter #(and (:final? %)
+                                         (not= :invoke (:type %)))
+                                    history))
+          failures (into [] (remove #(= :ok (:type %)) finals))]
+      {:valid?   (and (pos? (count finals)) (empty? failures))
+       :count    (count finals)
+       :failures (count failures)
+       :example  (first failures)})))
 
 (defn with-leader-retry!
   [test leader f]
@@ -425,6 +445,7 @@
                                        {:model (model/cas-register)})))
                    :stats        (checker/stats)
                    :exceptions   (NoExceptionsChecker.)
+                   :recovery     (RecoveryChecker.)
                    :timeline     (timeline/html)})
      :client    (KvClient. nil nil nil)
      :generator (gen/phases
@@ -433,7 +454,7 @@
                     (gen/nemesis (gen/once {:f :stop})))
                   (when nemesis-gen
                     (gen/sleep 5))
-                  (gen/clients (gen/each-thread (gen/once register-read))))}))
+                  (gen/clients (gen/each-thread (gen/once final-register-read))))}))
 
 (defn cloud9-test
   [opts]

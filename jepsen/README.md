@@ -62,4 +62,9 @@ serving node-local state.
 `c9 start` persists Raft hard state and log entries before sending network
 effects, then reconstructs KV state by replaying committed commands. Snapshot
 transfer, log compaction, read forwarding, and richer nemesis coverage are not
-complete yet.
+complete yet. Without snapshot-backed reclamation, the WAL grows to its 4 GiB
+limit and the node then fails closed.
+
+Peer HMAC authenticates message bodies but does not provide confidentiality or
+replay protection. Keep this transport on an isolated test network until it is
+replaced with mutually authenticated, replay-resistant transport security.
