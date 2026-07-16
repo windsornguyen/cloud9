@@ -54,3 +54,10 @@
                                  {:process 0 :type :fail :f :cas}])
         result (checker/check (checker/stats) {} events {})]
     (is (not= true (:valid? result)))))
+
+(deftest unhandled-client-exception-fails-the-checker
+  (let [events (history/history [{:process 0 :type :info :f :read
+                                  :exception {:via [{:type "boom"}]}}])
+        result (checker/check (cloud9/->NoExceptionsChecker) {} events {})]
+    (is (false? (:valid? result)))
+    (is (= 1 (:count result)))))

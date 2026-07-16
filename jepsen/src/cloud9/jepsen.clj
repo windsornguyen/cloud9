@@ -264,6 +264,14 @@
   [checker]
   (ClientOnlyChecker. checker))
 
+(defrecord NoExceptionsChecker []
+  checker/Checker
+  (check [_ _test history _opts]
+    (let [exceptions (into [] (h/filter :exception history))]
+      {:valid? (empty? exceptions)
+       :count  (count exceptions)
+       :example (first exceptions)})))
+
 (defn with-leader-retry!
   [test leader f]
   (loop [attempts 20]
@@ -413,7 +421,7 @@
                                      (checker/linearizable
                                        {:model (model/cas-register)})))
                    :stats        (checker/stats)
-                   :exceptions   (checker/unhandled-exceptions)
+                   :exceptions   (NoExceptionsChecker.)
                    :timeline     (timeline/html)})
      :client    (KvClient. nil nil nil)
      :generator (gen/phases
