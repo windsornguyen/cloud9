@@ -14,8 +14,11 @@ const DEFAULT_MAX_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// WAL configuration.
 #[derive(Debug, Clone)]
 pub struct WalOptions {
+    /// Maximum byte length of one segment.
     pub segment_size: u64,
+    /// Maximum total bytes across all segments.
     pub max_size: u64,
+    /// Whether each append reaches stable storage before returning.
     pub sync_on_append: bool,
 }
 

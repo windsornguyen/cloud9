@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+#![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-//! Tiny segmented write-ahead log.
+//! Segmented write-ahead log (WAL).
 //!
 //! The WAL deliberately owns only the byte-durability problem:
 //! 1. append one typed byte record to the active segment,

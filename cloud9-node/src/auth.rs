@@ -11,14 +11,17 @@ const SIGNATURE_BYTES: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Shared 256-bit key for authenticating Raft peer messages.
 #[derive(Clone)]
 pub struct RaftKey([u8; KEY_BYTES]);
 
+/// A configured Raft key is not exactly 32 hexadecimal bytes.
 #[derive(Debug, Error)]
 #[error("Raft key must be exactly 64 hexadecimal characters")]
 pub struct InvalidRaftKey;
 
 impl RaftKey {
+    /// Parse a 64-character hexadecimal key.
     pub fn from_hex(value: &str) -> Result<Self, InvalidRaftKey> {
         decode_hex(value).map(Self).ok_or(InvalidRaftKey)
     }

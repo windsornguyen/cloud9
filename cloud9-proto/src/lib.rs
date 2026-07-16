@@ -3,6 +3,7 @@
 use cloud9_core::SharedString;
 use serde::{Deserialize, Serialize};
 
+/// Generated ConnectRPC protocol types and clients.
 #[allow(warnings)]
 pub mod generated {
     connectrpc::include_generated!("_cloud9_connect.rs");

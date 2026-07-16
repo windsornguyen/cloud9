@@ -3,7 +3,9 @@ use crate::{Result, WalError};
 /// Position of a WAL record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Lsn {
+    /// Segment containing the record.
     pub segment_id: u64,
+    /// Byte offset of the record header within the segment.
     pub offset: u64,
 }
 
@@ -27,13 +29,17 @@ impl RecordKind {
 /// One logical WAL record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
+    /// Caller-defined non-zero record type.
     pub kind: RecordKind,
+    /// Uninterpreted record body.
     pub payload: Vec<u8>,
 }
 
 /// A record with its log position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredRecord {
+    /// Durable position of the record.
     pub lsn: Lsn,
+    /// Decoded record contents.
     pub record: Record,
 }
