@@ -6,6 +6,10 @@ starts `c9 start --config /opt/cloud9/cloud9.toml` with Jepsen's
 `start-daemon!`, and drives Cloud9's public KV API with a shared
 linearizable register workload.
 
+Each node requires the same 256-bit `cluster.raft_key`; peer RPC bodies are
+authenticated with HMAC-SHA256 before deserialization. The checked-in example
+key is only for local and Jepsen testing.
+
 Cloud9 is a relational database first: Postgres-compatible SQL and native KV are
 peer APIs over one MVCC storage layer, one transactional IR, one timestamp
 system, and one transaction coordinator. The KV workload here is the smallest
@@ -17,6 +21,10 @@ surface is only one Cloud9 API front door; SQL and KV are intended to lower into
 the same transactional IR.
 
 ## Build
+
+Build on a Linux Jepsen control host with the same CPU architecture as the DB
+nodes. The helper rejects host-native macOS builds because Jepsen uploads this
+binary directly to Debian.
 
 ```bash
 ./jepsen/scripts/build-target.sh
@@ -44,12 +52,14 @@ lein run test --nodes-file ~/nodes --username root --time-limit 60 --concurrency
 lein run serve
 ```
 
-The harness discovers the current Raft leader before opening client sessions and
-rediscovers it after failover. Followers reject mutating KV RPCs rather than
+The harness discovers the current Raft leader before opening client sessions,
+rediscovers it after failover, then heals the final fault and reads from every
+client thread before checking the history. Followers reject KV RPCs rather than
 serving node-local state.
 
 ## Current Limit
 
-`c9 start` now drives KV commands through Raft, but this is still a transient
-runtime: Raft persistence, snapshot transfer, read forwarding, and richer nemesis
-coverage are intentionally not complete yet.
+`c9 start` persists Raft hard state and log entries before sending network
+effects, then reconstructs KV state by replaying committed commands. Snapshot
+transfer, log compaction, read forwarding, and richer nemesis coverage are not
+complete yet.

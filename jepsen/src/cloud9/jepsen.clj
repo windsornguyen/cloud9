@@ -33,6 +33,7 @@
 (def pidfile (str dir "/cloud9.pid"))
 (def kv-service "cloud9.kv.v1.KvService")
 (def kv-namespace "jepsen")
+(def raft-key "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 
 (defn canonical-path
   [path]
@@ -65,6 +66,7 @@
        "data_dir = \"" data-dir "\"\n"
        "\n"
        "[cluster]\n"
+       "raft_key = \"" raft-key "\"\n"
        "peers = [\n"
        (peer-config test)
        "\n]\n"))
@@ -236,13 +238,22 @@
 (defn not-leader?
   [e]
   (and (= 400 (:status e))
-       (str/includes? (str (:body e)) "not leader")))
+       (= "failed_precondition" (:code (:body e)))
+       (str/includes? (str (:message (:body e))) "not leader")))
+
+(defn not-found?
+  [e]
+  (= "not_found" (:code (:body e))))
 
 (defn recoverable-rpc-error?
   [e]
   (or (nil? (:status e))
       (#{408 500 502 503 504} (:status e))
       (not-leader? e)))
+
+(defn expected-cas-failure?
+  [e]
+  (#{"failed_precondition" "not_found"} (:code (:body e))))
 
 (defrecord ClientOnlyChecker [checker]
   checker/Checker
@@ -303,7 +314,7 @@
              :type :ok
              :value (independent/tuple k (decode-value (:body entry)))))
     (catch [:type ::rpc-error] e
-      (if (= 404 (:status e))
+      (if (not-found? e)
         (assoc op :type :ok :value (independent/tuple k nil))
         (throw+ e)))))
 
@@ -319,7 +330,7 @@
           (do (put-value! test leader session sequence k to {:ifMatch (:etag entry)})
               (assoc op :type :ok)))))
     (catch [:type ::rpc-error] e
-      (if (#{400 404 409 412} (:status e))
+      (if (expected-cas-failure? e)
         (assoc op :type :fail)
         (throw+ e)))))
 
@@ -391,18 +402,27 @@
   [opts]
   (let [client-gen (cond->> (gen/mix [register-read register-write register-cas register-cas])
                      (pos? (:stagger opts)) (gen/stagger (:stagger opts)))
-        nemesis-gen (nemesis-generator opts)]
+        nemesis-gen (nemesis-generator opts)
+        main-gen (cond->> (if nemesis-gen
+                            (gen/clients client-gen nemesis-gen)
+                            (gen/clients client-gen))
+                   (:time-limit opts) (gen/time-limit (:time-limit opts)))]
     {:checker   (checker/compose
                   {:linearizable (client-only
                                    (independent/checker
                                      (checker/linearizable
                                        {:model (model/cas-register)})))
+                   :stats        (checker/stats)
+                   :exceptions   (checker/unhandled-exceptions)
                    :timeline     (timeline/html)})
      :client    (KvClient. nil nil nil)
-     :generator (cond->> (if nemesis-gen
-                           (gen/clients client-gen nemesis-gen)
-                           (gen/clients client-gen))
-                  (:time-limit opts) (gen/time-limit (:time-limit opts)))}))
+     :generator (gen/phases
+                  main-gen
+                  (when nemesis-gen
+                    (gen/nemesis (gen/once {:f :stop})))
+                  (when nemesis-gen
+                    (gen/sleep 5))
+                  (gen/clients (gen/each-thread (gen/once register-read))))}))
 
 (defn cloud9-test
   [opts]
