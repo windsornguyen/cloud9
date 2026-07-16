@@ -10,7 +10,8 @@ This project adheres to a code of conduct that all contributors are expected to 
 
 ### Prerequisites
 
-- **Rust**: 1.75.0 or later (install via [rustup](https://rustup.rs/))
+- **Rust**: 1.95.0 or later (install via [rustup](https://rustup.rs/))
+- **protoc**: Required to generate the Connect RPC types
 - **Git**: For version control
 - **Cargo tools**:
   ```bash
@@ -30,10 +31,10 @@ cargo build
 
 ```bash
 # Single-node instance
-cargo run --bin c9
+cargo run --bin c9 -- start --config cloud9.example.toml
 
 # With debug logging
-RUST_LOG=debug cargo run --bin c9
+RUST_LOG=debug cargo run --bin c9 -- start --config cloud9.example.toml
 ```
 
 ## Testing

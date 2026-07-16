@@ -295,7 +295,7 @@ cd cloud9
 cargo build --release
 
 # Run single-node instance
-./target/release/c9
+./target/release/c9 start --config cloud9.example.toml
 
 # Run tests
 cargo test --workspace
@@ -321,4 +321,3 @@ Cloud9 is released under the [MIT License](LICENSE).
 - [FoundationDB: A Distributed Unbundled Transactional Key Value Store](https://www.foundationdb.org/files/fdb-paper.pdf)
 - [Comet: An Active Distributed {Key-Value}
 Store](https://www.usenix.org/legacy/event/osdi10/tech/full_papers/Geambasu.pdf)
-
