@@ -10,15 +10,14 @@ Each node requires the same 256-bit `cluster.raft_key`; peer RPC bodies are
 authenticated with HMAC-SHA256 before deserialization. The checked-in example
 key is only for local and Jepsen testing.
 
-Cloud9 is a relational database first: Postgres-compatible SQL and native KV are
-peer APIs over one MVCC storage layer, one transactional IR, one timestamp
-system, and one transaction coordinator. The KV workload here is the smallest
-front door Jepsen can drive today, not a separate product direction.
+Cloud9 treats SQL, key-value, document, object, and analytical APIs as source
+dialects. The KV API is the first implemented dialect and the smallest
+interface Jepsen can drive today. It does not define the final storage model.
 
 The workload maps one shared register to `namespace/key`, writes JSON values as
-value bodies, and implements CAS with S3-style ETag preconditions. This KV
-surface is only one Cloud9 API front door; SQL and KV are intended to lower into
-the same transactional IR.
+value bodies, and implements CAS with S3-style ETag preconditions. The target
+architecture lowers this request through the shared transaction IR into a
+point-operation physical dialect.
 
 ## Build
 

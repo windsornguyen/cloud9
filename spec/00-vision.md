@@ -1,49 +1,92 @@
 # Cloud9 Vision
 
-**Cloud9 is the distributed database that should have existed from the start.**
+Cloud9 is an open-source Spanner and MLIR for databases.
 
-Spanner proved that external consistency is achievable with commit-wait and precise time. FoundationDB proved that SQL and KV can share one transactional core. Postgres proved that full ACID with referential integrity is what developers expect. CockroachDB proved that you can build this in the open.
+It combines one distributed correctness plane with several database dialects
+and physical engines. The same database can serve relational, key-value,
+document, object, and analytical workloads without reducing every workload to
+one physical model.
 
-**Nobody combined them all.**
+## Product Contract
 
-Cloud9 is the synthesis: Spanner's correctness + Postgres's compatibility + FoundationDB's architecture + open-source transparency. No corporate compromises. No vendor lock-in. No "this feature costs extra." Just the theoretically optimal distributed database, available to everyone.
+Cloud9 targets two deployment extremes:
 
-## The Core Guarantee
+- Local development should feel like SQLite.
+- Distributed deployment should scale across regions and continents.
 
-**If you finish a write and start a read, that read sees the write. Anywhere in the world. Always. Provably.**
+The data model and transaction interfaces stay stable between them. Hardware
+capabilities may differ. In particular, local mode does not claim
+hardware-backed TrueTime.
 
-That's external consistency. It's a mathematical guarantee, proven with formal methods. The same guarantee Google uses for ads billing, where every cent must be accounted for.
+## Database Dialects
 
-## What Makes Cloud9 Unique
+Cloud9 treats APIs as source dialects:
 
-Every distributed database uses proven components (MVCC, Raft, HLC, commit-wait). None combine all of them with:
-- SQL and KV unified under one transaction model
-- True Postgres compatibility (foreign keys, triggers, constraints)
-- Local-to-global deployment with the same binary
-- MIT license with no vendor lock-in
+- SQL for relational workloads.
+- DynamoDB-style key-value operations.
+- MongoDB-style document operations.
+- S3-style object operations.
+- ClickHouse-style analytical plans.
 
-**This isn't novel research—it's what distributed databases should have been from the start.**
+Each dialect preserves its source semantics. Compatibility is not an HTTP skin
+over a generic row store.
 
-Spanner proved the foundation (external consistency via commit-wait). FoundationDB proved the layering (SQL+KV over one transactional core). Postgres proved the interface (wire compatibility, full ACID).
+## Multi-Level IR
 
-Cloud9 is the **disciplined execution** of combining these proven principles into a coherent whole, without the compromises forced by corporate constraints:
-- Spanner compromised: SQL-only, no foreign keys, proprietary, cloud-only
-- CockroachDB compromised: SQL-only, then went proprietary (BSL)
-- YugabyteDB compromised: SQL and KV exist but aren't unified
-- DynamoDB compromised: KV-only, eventual consistency, no transactions
+Cloud9 uses several typed intermediate representations (IRs). This follows the
+same principle as MLIR: preserve high-level meaning until a lower level can
+represent it without loss.
 
-**Cloud9 makes no compromises.** External consistency + SQL + KV + open source + local-to-global.
+Surface dialects lower into semantic IRs. Semantic IRs lower into transaction,
+time, placement, and physical IRs. Physical IRs select row, key-value,
+document, object, or columnar execution.
 
-## The Target
+The shared layers own correctness. Specialized layers own performance.
 
-**You shouldn't need a Google-sized budget to get Google-class correctness.**
+## Core Guarantees
 
-Cloud9 brings external consistency to:
-- Students learning distributed systems
-- Startups building the next platform
-- Enterprises that need bulletproof data
-- Developers who refuse to compromise on correctness
+Cloud9 is designed around:
 
-Whether you run it on a Raspberry Pi or across continents, the same database, the same guarantees, the same code.
+- atomic transactions across compatible dialects;
+- multi-version concurrency control (MVCC);
+- Raft-replicated state machines;
+- explicit locality and placement;
+- external consistency when bounded-time hardware is available;
+- fail-closed behavior when a required invariant cannot be proven.
 
-**The daily driver database for the distributed era.**
+External consistency means real-time order constrains transaction order. If one
+transaction finishes before another starts, the first must appear earlier.
+
+## Bounded Time
+
+Cloud9 exposes a TrueTime-shaped interval API:
+
+```text
+now() -> [earliest, latest]
+```
+
+The interval must contain real time. A valid bound permits commit-wait and safe
+ordering across machines.
+
+TrueTime mode requires a supported bounded-time source. The first target is AWS
+ClockBound on supported Linux EC2 hardware.
+
+Cloud9 refuses TrueTime mode when the provider is absent, unhealthy, or outside
+the configured uncertainty bound. There is no silent fallback to Hybrid
+Logical Clocks (HLCs).
+
+## Performance Contract
+
+Cloud9 targets specialized-database performance by preserving specialization. A
+columnar analytical engine should not execute through a row-oriented hot path.
+An object read should not become a document query.
+
+Performance claims require reproducible benchmarks. Each result must state the
+workload, topology, hardware, durability, and consistency mode.
+
+## Current Boundary
+
+The repository is an implementation in progress. Current code includes Raft,
+durable log storage, replicated key-value operations, and Jepsen tests. The
+remaining dialects, MVCC, distributed transactions, physical engines, and
+bounded-time integration are target architecture.

@@ -1,203 +1,120 @@
-# TrueTime Analysis
+# Bounded-Time Analysis
 
-## Overview
+Cloud9 needs a bounded interval around real UTC. A synchronized point estimate
+is insufficient.
 
-TrueTime is not a heuristic - it is a provably correct approach to bounded clock uncertainty in distributed systems. This document explains the mathematical foundations, correctness guarantees, and implications for Cloud9.
+Let a provider return:
 
-## The 30-Second Sync Explained
-
-TrueTime synchronizes with GPS and atomic clocks every 30 seconds. This interval is not arbitrary - it is an engineered choice based on hardware characteristics.
-
-**Uncertainty formula**:
-```
-ε(t) = sync_error + drift_rate × time_since_sync
+```text
+TT.now() = [earliest, latest]
 ```
 
-**Example calculation**:
-- `sync_error` = 1 μs (GPS accuracy)
-- `drift_rate` = 200 ppm (200 microseconds per second, typical quartz oscillator)
-- `time_since_sync` = 30 seconds
+The provider contract is:
 
-```
-ε = 1 μs + (200 μs/s × 30s) = 6001 μs ≈ 6ms
+```text
+earliest <= real_utc <= latest
 ```
 
-**The bound is mathematical, not empirical guesswork.**
+Define uncertainty as:
 
-## Mathematical Proof of Correctness
-
-### TrueTime Invariant
-
-`TT.now()` returns an interval `[earliest, latest]` where:
-```
-earliest ≤ absolute_true_time ≤ latest  (always)
+```text
+epsilon = latest - earliest
 ```
 
-### How the Invariant Is Maintained
+Cloud9 treats this containment rule as a correctness assumption. The deployment
+must use an approved provider that can uphold it.
 
-1. At sync time t₀: measure offset from GPS/atomic clock → `sync_error`
-2. Between syncs: bound grows linearly with known `drift_rate`
-3. TrueTime daemon continuously computes: `ε(t) = sync_error + drift_rate × (t - t₀)`
-4. Returns interval: `[now - ε, now + ε]`
+## Commit Rule
 
-### Formal Proof
+Cloud9 chooses:
 
-**Theorem**: If two TrueTime intervals don't overlap (`l₁ < e₂`), then the events happened in that order in absolute time.
-
-**Proof sketch**:
-- Event 1 occurs at absolute time `t₁`, TrueTime returns `[e₁, l₁]`
-- By invariant: `e₁ ≤ t₁ ≤ l₁`
-- Event 2 occurs at absolute time `t₂`, TrueTime returns `[e₂, l₂]`
-- By invariant: `e₂ ≤ t₂ ≤ l₂`
-- If `l₁ < e₂`, then `t₁ ≤ l₁ < e₂ ≤ t₂`
-- Therefore `t₁ < t₂` (absolute time ordering)
-
-**Spanner's external consistency** follows from this property combined with the commit-wait protocol.
-
-## Why It's Not Heuristic
-
-### The Difference from Heuristics
-
-**Heuristic approach** would be: "We think clocks are usually within 10ms, so let's use that."
-
-**TrueTime approach** is: "We measure sync error, we know drift rate from hardware specs, we compute ε = f(sync_error, drift_rate, time), and we prove that [now - ε, now + ε] contains true time."
-
-**The correctness is proven**, assuming:
-1. Sync error measurement is accurate (GPS provides this)
-2. Drift rate is bounded (quartz spec sheets provide this)
-3. No Byzantine faults (time masters don't lie maliciously)
-
-All three are reasonable assumptions with continuous monitoring.
-
-### Why 30 Seconds Specifically
-
-**Trade-offs**:
-- **Shorter interval** (e.g., 1 second): Lower ε, higher sync overhead
-- **Longer interval** (e.g., 5 minutes): Lower overhead, larger ε
-
-**Google chose 30s** because:
-1. With 200 ppm drift, 30s → ~6ms uncertainty (acceptable for write latency)
-2. GPS/atomic clocks are stable enough to trust over 30s
-3. Sync overhead is negligible (one request per 30s)
-4. Safety margin: can tolerate missed sync without ε explosion
-
-**It's not arbitrary - it's an engineered choice based on hardware characteristics.**
-
-## Failure Modes
-
-### Drift Exceeds Specification
-- Next sync detects large offset
-- ε grows beyond acceptable threshold
-- System can refuse writes (fail-safe) or alert operators
-- **Response**: Increase commit-wait proportionally or reject transactions
-
-### GPS Outage
-- Atomic clocks continue providing stable reference
-- ε stays small for hours (atomic clock stability)
-- Fallback: increase ε bound, continue with higher latency
-- **Response**: Graceful degradation with documented impact
-
-### Both GPS and Atomic Fail
-- ε grows unbounded
-- System must stop writes or increase commit-wait proportionally
-- Spanner paper: "conservatively refuse transactions" in this scenario
-- **Response**: Fail-stop to preserve correctness
-
-### Key Safety Property
-
-**TrueTime never violates the invariant.** If uncertainty cannot be bounded, the system:
-1. Increases ε (and thus commit-wait latency)
-2. OR refuses to assign timestamps
-3. Never silently returns incorrect bounds
-
-This is **fail-safe**, not fail-fast: the system prioritizes correctness over availability.
-
-## Implications for Cloud9
-
-### Cloud9 Must Implement the Same Rigorous Approach
-
-```rust
-struct TimeSource {
-    last_sync: Instant,
-    sync_error: Duration,
-    drift_rate_ppm: f64,
-}
-
-impl TimeSource {
-    fn uncertainty(&self) -> Duration {
-        let elapsed = self.last_sync.elapsed();
-        let drift = Duration::from_micros(
-            (elapsed.as_micros() as f64 * self.drift_rate_ppm / 1_000_000.0) as u64
-        );
-        self.sync_error + drift
-    }
-
-    fn now_interval(&self) -> (Timestamp, Timestamp) {
-        let now = Timestamp::now();
-        let ε = self.uncertainty();
-        (now - ε, now + ε)
-    }
-}
+```text
+commit_time >= TT.now().latest
 ```
 
-### Continuous Monitoring Required
+It returns success only after:
 
-- Track actual vs expected sync offsets
-- Alert if drift_rate exceeds spec
-- Fail-stop if ε > max_offset
-- Log all sync errors and clock adjustments
+```text
+TT.now().earliest > commit_time
+```
 
-**Not heuristic - measured, bounded, proven.**
+At response time, real UTC is therefore later than `commit_time`.
 
-### Cloud9 Time Synchronization Options
+If another transaction begins after that response, its `latest` bound is later
+than real UTC at the first response. Its commit timestamp must be later than
+the first timestamp. This establishes real-time order for non-overlapping
+transactions.
 
-Cloud9 implements the same mathematical rigor as TrueTime, but adapts to available infrastructure:
+## What Bounded Time Does Not Prove
 
-#### 1. HLC Mode (Default)
-- Use NTP/PTP for clock synchronization
-- Measure and track ε using chrony statistics
-- Commit-wait duration = ε (typically 10-50ms on cloud)
-- **Advantage**: Works on commodity hardware
-- **Trade-off**: Larger ε than TrueTime
+Bounded time does not provide:
 
-#### 2. GPS + Atomic Clocks (Premium)
-- Install GPS receivers and atomic clocks (colo/on-prem)
-- Direct PTP feed to Cloud9 nodes
-- Achieve ε < 1ms (TrueTime-class performance)
-- **Advantage**: Minimal commit-wait latency
-- **Trade-off**: Hardware cost and operational complexity
+- serializable conflict handling;
+- atomic commit across ranges;
+- durable replication;
+- idempotent retries;
+- safe follower reads.
 
-#### 3. TSO Mode (Alternative)
-- Use centralized timestamp oracle instead of physical time
-- No clock synchronization needed
-- External consistency guaranteed by serialization
-- **Advantage**: Simpler when clock sync is unreliable
-- **Trade-off**: Oracle becomes bottleneck
+MVCC, transaction coordination, Raft, and recovery provide those properties.
+Bounded time connects their serialization order to real time.
 
-### The Key Insight
+## ClockBound's Role
 
-**The protocol (commit-wait + bounded uncertainty) is what matters, not the specific hardware.**
+AWS ClockBound exposes an interval and clock status to local clients. Cloud9
+uses it as the first implementation of the bounded-time provider contract.
 
-TrueTime achieves tight bounds (ε < 7ms) because Google has GPS + atomic clocks. Cloud9 can achieve the same correctness with looser bounds (ε = 10-50ms) using NTP/PTP. The latency differs, but the guarantees are identical.
+ClockBound is not the transaction protocol. Cloud9 still validates provider
+health, enforces uncertainty policy, assigns timestamps, and performs
+commit-wait.
 
-**External consistency is provable in both cases** - the math doesn't change, only the constant ε.
+Cloud9 should describe this mode as TrueTime-shaped. Google TrueTime is a
+specific Google service. The shared idea is an API that returns a trustworthy
+time interval.
 
-### What Cloud9 Learns from TrueTime
+## Hardware Boundary
 
-1. **Bounded uncertainty is non-negotiable**: Must measure and enforce ε
-2. **Fail-safe is correct**: Refuse transactions rather than violate invariants
-3. **Continuous monitoring is essential**: Track clock health in real-time
-4. **Hardware determines ε, protocol ensures correctness**: Both matter
-5. **Document the math**: Users trust provable systems over heuristics
+Cloud9's first TrueTime mode requires supported Linux EC2 hardware, Amazon Time
+Sync, a precision hardware clock, and ClockBound. The exact supported instance
+families and drivers follow current AWS documentation.
 
-## Summary
+An ordinary NTP-synchronized system clock does not satisfy this mode. An HLC
+also does not satisfy it. Either could support a separately named consistency
+mode, but neither may appear as an automatic fallback.
 
-TrueTime is not a heuristic. It is a formally proven approach to bounded clock uncertainty:
+## Uncertainty Cost
 
-- **Sync every 30 seconds** is an engineered choice based on drift rate math
-- **ε = sync_error + drift_rate × time** is a proven bound on uncertainty
-- **[earliest, latest] contains absolute time** is a maintained invariant
-- **External consistency follows** from this invariant + commit-wait
-- **Failure modes are explicit** and preserve correctness (fail-safe)
+Commit-wait latency grows with the uncertainty interval. A wider bound is still
+correct when it remains within policy, but it delays acknowledgements.
 
-Cloud9 implements the same rigorous approach, adapting to available time infrastructure while maintaining identical correctness guarantees.
+Performance work should reduce measured uncertainty without weakening the
+containment guarantee. Benchmarks must report interval width and commit-wait
+time.
+
+## Failure Model
+
+Cloud9 rejects the provider when:
+
+- status reports unsynchronized or unknown time;
+- uncertainty exceeds configured policy;
+- the interval is malformed;
+- the host loses the required hardware path;
+- the provider daemon or client interface is unavailable.
+
+These failures remove readiness for TrueTime-dependent operations. Existing
+data remains durable. The node does not silently change its consistency
+contract.
+
+## Proof Obligations
+
+A production backend needs evidence for:
+
+1. Real UTC containment under normal operation.
+2. Detection of source loss and clock steps.
+3. Correct leap-second behavior.
+4. Safe behavior across suspend, resume, and migration.
+5. Correct interval propagation into commit-wait.
+6. A maximum accepted uncertainty policy.
+7. End-to-end histories that verify strict serializability.
+
+Unit tests can prove Cloud9's interval arithmetic. Hardware integration tests
+must prove the provider assumptions.

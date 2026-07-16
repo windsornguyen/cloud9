@@ -255,14 +255,15 @@ Cloud9 follows [Conventional Commits](https://www.conventionalcommits.org/):
 - `docs`: Documentation changes
 - `chore`: Build, CI, or tooling changes
 
-**Scopes**: `kv`, `raft`, `txn`, `sql`, `hlc`, `sim`, `ci`
+**Scopes**: `core`, `consensus`, `storage`, `node`, `proto`, `ci`, `deps`,
+`docs`
 
 **Examples**:
 ```
-feat(txn): implement commit-wait for external consistency
+feat(core): implement bounded-time commit-wait
 
-Add HLC-based commit-wait that delays transaction acknowledgment
-until all replicas have passed the commit timestamp.
+Reject unhealthy time intervals and delay acknowledgment until the commit
+timestamp is certainly in the past.
 
 Closes #123
 ```

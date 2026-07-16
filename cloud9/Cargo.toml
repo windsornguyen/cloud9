@@ -7,7 +7,7 @@ license = { workspace = true }
 authors = { workspace = true }
 repository = { workspace = true }
 homepage = { workspace = true }
-description = "A globally distributed database with provable external consistency"
+description = "An open-source Spanner and MLIR for databases"
 
 [[bin]]
 name = "c9"
