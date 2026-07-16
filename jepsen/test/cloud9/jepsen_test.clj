@@ -33,11 +33,14 @@
     (is (not (cloud9/recoverable-rpc-error? {:status 412})))))
 
 (deftest cas-failures-require-the-exact-connect-code
-  (is (cloud9/expected-cas-failure? {:body {:code "failed_precondition"}}))
-  (is (cloud9/expected-cas-failure? {:body {:code "not_found"}}))
+  (is (cloud9/expected-cas-failure? {:status 400
+                                     :body {:code "failed_precondition"}}))
+  (is (cloud9/expected-cas-failure? {:status 404
+                                     :body {:code "not_found"}}))
   (is (not (cloud9/expected-cas-failure? {:status 400
                                           :body {:code "invalid_argument"}})))
-  (is (not (cloud9/expected-cas-failure? {:status 409}))))
+  (is (not (cloud9/expected-cas-failure? {:status 500
+                                          :body {:code "failed_precondition"}}))))
 
 (deftest workload-builds-with-and-without-the-nemesis
   (doseq [mode ["none" "kill-leader"]]

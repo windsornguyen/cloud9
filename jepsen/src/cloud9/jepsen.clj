@@ -243,7 +243,8 @@
 
 (defn not-found?
   [e]
-  (= "not_found" (:code (:body e))))
+  (and (= 404 (:status e))
+       (= "not_found" (:code (:body e)))))
 
 (defn recoverable-rpc-error?
   [e]
@@ -253,7 +254,9 @@
 
 (defn expected-cas-failure?
   [e]
-  (#{"failed_precondition" "not_found"} (:code (:body e))))
+  (or (and (= 400 (:status e))
+           (= "failed_precondition" (:code (:body e))))
+      (not-found? e)))
 
 (defrecord ClientOnlyChecker [checker]
   checker/Checker
