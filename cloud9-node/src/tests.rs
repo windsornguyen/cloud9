@@ -194,6 +194,15 @@ async fn invariant_three_nodes_replicate_and_fail_over() -> Result<()> {
     let survivors = (0..3).filter(|node| *node != leader).collect::<Vec<_>>();
     let replacement = wait_for_cluster_leader(&runtimes, &survivors).await?;
     runtimes[replacement].read_barrier().await?;
+    let state = states[replacement].read().await;
+    let record = state
+        .entries
+        .get(&KvName::new("test", "key")?)
+        .ok_or_else(|| anyhow::anyhow!("replacement leader is missing the replicated key"))?;
+    assert_eq!(b"value", record.body.as_slice());
+    assert_eq!("\"c9-1\"", record.etag);
+    assert_eq!(1, record.generation);
+    drop(state);
 
     for task in drivers {
         task.abort();

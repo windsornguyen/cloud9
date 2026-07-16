@@ -3,9 +3,9 @@
 //! Every step is serialized with its WAL. Persistent state is synced before
 //! network effects are released, then committed commands are applied in order.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use cloud9_raft::raft::{Effects, Message};
 use cloud9_raft::{Command, LogIndex, NodeId, ProposeError, RaftNode};
@@ -24,6 +24,12 @@ const PROPOSAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub(crate) enum RuntimeError {
+    #[error("node id {node_id} does not match consensus id {consensus_id}")]
+    IdentityMismatch { node_id: NodeId, consensus_id: NodeId },
+    #[error("cluster peers do not map node {node_id} to its Raft address {raft_addr}")]
+    InvalidSelfPeer { node_id: NodeId, raft_addr: std::net::SocketAddr },
+    #[error("cluster peers contain duplicate Raft address {address}")]
+    DuplicatePeerAddress { address: std::net::SocketAddr },
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("Raft snapshot transport is not implemented")]
@@ -50,6 +56,7 @@ struct RaftMachine {
 }
 
 struct PendingProposal {
+    id: u64,
     command: Vec<u8>,
     sender: oneshot::Sender<Result<KvApplyResult, ConnectError>>,
 }
@@ -65,11 +72,34 @@ impl PendingProposal {
     }
 }
 
+struct PendingCleanup {
+    waiters: Arc<StdMutex<HashMap<LogIndex, PendingProposal>>>,
+    index: LogIndex,
+    id: u64,
+    armed: bool,
+}
+
+impl PendingCleanup {
+    fn finish(mut self) {
+        remove_pending(&self.waiters, self.index, self.id);
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_pending(&self.waiters, self.index, self.id);
+        }
+    }
+}
+
 pub(crate) struct RaftRuntime {
     config: NodeConfig,
     machine: Mutex<RaftMachine>,
     state: Arc<RwLock<KvState>>,
-    waiters: Mutex<HashMap<LogIndex, PendingProposal>>,
+    waiters: Arc<StdMutex<HashMap<LogIndex, PendingProposal>>>,
+    next_proposal_id: AtomicU64,
     transport: PeerTransport,
     failed: AtomicBool,
 }
@@ -79,6 +109,7 @@ impl RaftRuntime {
         config: NodeConfig,
         state: Arc<RwLock<KvState>>,
     ) -> Result<Self, RuntimeError> {
+        validate_config(&config)?;
         let voters = config.peers.keys().copied().collect::<Vec<_>>();
         let initial = RaftNode::new(config.consensus.clone(), &voters);
         let store = RaftStore::open(&config.raft_dir(), initial.persistent().clone())?;
@@ -88,7 +119,8 @@ impl RaftRuntime {
             config,
             machine: Mutex::new(RaftMachine { node, store }),
             state,
-            waiters: Mutex::new(HashMap::new()),
+            waiters: Arc::new(StdMutex::new(HashMap::new())),
+            next_proposal_id: AtomicU64::new(1),
             transport,
             failed: AtomicBool::new(false),
         })
@@ -130,32 +162,42 @@ impl RaftRuntime {
 
     pub(crate) async fn propose(&self, command: KvCommand) -> Result<KvApplyResult, ConnectError> {
         self.ensure_healthy().map_err(|error| runtime_connect_error(&error))?;
+        let proposal_id = self
+            .next_proposal_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| ConnectError::resource_exhausted("proposal id space exhausted"))?;
         let bytes = serde_json::to_vec(&command)
             .map_err(|_| ConnectError::internal("failed to encode Raft command"))?;
-        let (index, receiver) = {
+        let (receiver, cleanup) = {
             let mut machine = self.machine.lock().await;
             let (index, effects) = machine
                 .node
                 .propose(Command(bytes.clone()))
                 .map_err(|error| propose_error(&error))?;
             let (sender, receiver) = oneshot::channel();
-            self.waiters.lock().await.insert(index, PendingProposal { command: bytes, sender });
+            lock_waiters(&self.waiters)
+                .insert(index, PendingProposal { id: proposal_id, command: bytes, sender });
+            let cleanup = PendingCleanup {
+                waiters: self.waiters.clone(),
+                index,
+                id: proposal_id,
+                armed: true,
+            };
             if let Err(error) = self.handle_effects(&mut machine, effects).await {
-                self.waiters.lock().await.remove(&index);
+                cleanup.finish();
                 let error = self.fail(error);
                 return Err(runtime_connect_error(&error));
             }
-            (index, receiver)
+            (receiver, cleanup)
         };
 
-        match timeout(PROPOSAL_TIMEOUT, receiver).await {
+        let result = match timeout(PROPOSAL_TIMEOUT, receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(ConnectError::aborted("Raft proposal was dropped")),
-            Err(_) => {
-                self.waiters.lock().await.remove(&index);
-                Err(ConnectError::unavailable("Raft proposal timed out"))
-            }
-        }
+            Err(_) => Err(ConnectError::unavailable("Raft proposal timed out")),
+        };
+        cleanup.finish();
+        result
     }
 
     pub(crate) async fn read_barrier(&self) -> Result<(), ConnectError> {
@@ -207,15 +249,13 @@ impl RaftRuntime {
     }
 
     async fn apply_committed(&self, node: &mut RaftNode) {
-        let entries = node.committed().collect::<Vec<_>>();
-        let mut applied_to = None;
-        for entry in entries {
+        loop {
+            let Some(entry) = node.committed().next() else {
+                return;
+            };
             let result = self.apply_command(&entry.command).await;
-            self.complete_waiter(entry.index, &entry.command, result).await;
-            applied_to = Some(entry.index);
-        }
-        if let Some(index) = applied_to {
-            node.advance(index);
+            node.advance(entry.index);
+            self.complete_waiter(entry.index, &entry.command, result);
         }
     }
 
@@ -225,13 +265,13 @@ impl RaftRuntime {
         self.state.write().await.apply(command)
     }
 
-    async fn complete_waiter(
+    fn complete_waiter(
         &self,
         index: LogIndex,
         command: &Command,
         result: Result<KvApplyResult, ConnectError>,
     ) {
-        if let Some(pending) = self.waiters.lock().await.remove(&index) {
+        if let Some(pending) = lock_waiters(&self.waiters).remove(&index) {
             pending.complete(command, result);
         }
     }
@@ -247,6 +287,46 @@ impl RaftRuntime {
     fn fail(&self, error: RuntimeError) -> RuntimeError {
         self.failed.store(true, Ordering::Release);
         error
+    }
+}
+
+fn validate_config(config: &NodeConfig) -> Result<(), RuntimeError> {
+    if config.node_id != config.consensus.id {
+        return Err(RuntimeError::IdentityMismatch {
+            node_id: config.node_id,
+            consensus_id: config.consensus.id,
+        });
+    }
+    if config.peers.get(&config.node_id) != Some(&config.raft_addr) {
+        return Err(RuntimeError::InvalidSelfPeer {
+            node_id: config.node_id,
+            raft_addr: config.raft_addr,
+        });
+    }
+    let mut addresses = HashSet::new();
+    if let Some(address) = config.peers.values().find(|address| !addresses.insert(**address)) {
+        return Err(RuntimeError::DuplicatePeerAddress { address: *address });
+    }
+    Ok(())
+}
+
+fn remove_pending(
+    waiters: &StdMutex<HashMap<LogIndex, PendingProposal>>,
+    index: LogIndex,
+    id: u64,
+) {
+    let mut waiters = lock_waiters(waiters);
+    if waiters.get(&index).is_some_and(|pending| pending.id == id) {
+        waiters.remove(&index);
+    }
+}
+
+fn lock_waiters(
+    waiters: &StdMutex<HashMap<LogIndex, PendingProposal>>,
+) -> StdMutexGuard<'_, HashMap<LogIndex, PendingProposal>> {
+    match waiters.lock() {
+        Ok(waiters) => waiters,
+        Err(_poisoned) => std::process::abort(),
     }
 }
 
@@ -268,15 +348,113 @@ fn runtime_connect_error(error: &RuntimeError) -> ConnectError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use cloud9_core::SharedString;
+    use cloud9_storage::StorageOptions;
+
+    use crate::RaftKey;
+
     use super::*;
 
     #[tokio::test]
     async fn invariant_log_overwrite_cannot_complete_a_different_proposal() {
         let (sender, receiver) = oneshot::channel();
-        let pending = PendingProposal { command: b"original".to_vec(), sender };
+        let pending = PendingProposal { id: 1, command: b"original".to_vec(), sender };
 
         pending.complete(&Command(b"replacement".to_vec()), Ok(KvApplyResult::ReadBarrier));
 
         assert!(receiver.await.unwrap().is_err());
+    }
+
+    #[test]
+    fn invariant_runtime_identity_is_unambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.consensus.id = NodeId(1);
+        assert!(matches!(validate_config(&config), Err(RuntimeError::IdentityMismatch { .. })));
+
+        let mut config = test_config(dir.path());
+        config.raft_addr.set_port(19_092);
+        assert!(matches!(validate_config(&config), Err(RuntimeError::InvalidSelfPeer { .. })));
+
+        let mut config = test_config(dir.path());
+        config.peers.insert(NodeId(1), config.raft_addr);
+        assert!(matches!(validate_config(&config), Err(RuntimeError::DuplicatePeerAddress { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invariant_cancelled_delivery_does_not_reapply_a_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let state = Arc::new(RwLock::new(KvState::new()));
+        let runtime = Arc::new(RaftRuntime::open(config, state.clone()).unwrap());
+        let driver = tokio::spawn(runtime.clone().run());
+        timeout(Duration::from_secs(1), async {
+            while runtime.mode().await != "leader" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let state_guard = state.write().await;
+        let proposing = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.propose(KvCommand::RegisterSession).await }
+        });
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if !runtime.waiters.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let waiters = runtime.waiters.clone();
+        let (locked_sender, locked_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let lock_thread = std::thread::spawn(move || {
+            let _guard = lock_waiters(&waiters);
+            locked_sender.send(()).unwrap();
+            release_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+        locked_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(state_guard);
+        let applied_guard = timeout(Duration::from_secs(1), state.read()).await.unwrap();
+
+        proposing.abort();
+        drop(applied_guard);
+        release_sender.send(()).unwrap();
+        lock_thread.join().unwrap();
+        let _ = proposing.await;
+        assert!(runtime.waiters.lock().unwrap().is_empty());
+
+        let result = runtime.propose(KvCommand::RegisterSession).await.unwrap();
+        let KvApplyResult::RegisterSession(response) = result else {
+            panic!("session proposal returned the wrong result");
+        };
+        assert_eq!(2, response.client_id);
+        driver.abort();
+    }
+
+    fn test_config(path: &std::path::Path) -> NodeConfig {
+        let node_id = NodeId(0);
+        let raft_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 19_091));
+        NodeConfig {
+            node_id,
+            client_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 19_090)),
+            raft_addr,
+            peers: BTreeMap::from([(node_id, raft_addr)]),
+            raft_key: RaftKey::from_hex(&"01".repeat(32)).unwrap(),
+            storage: StorageOptions {
+                name: SharedString::literal("test"),
+                data_dir: SharedString::from(path.to_string_lossy()),
+            },
+            consensus: crate::raft_config(node_id),
+        }
     }
 }
