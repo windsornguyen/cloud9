@@ -1,0 +1,21 @@
+[package]
+name = "cloud9-wal"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+description = "Minimal segmented write-ahead log for Cloud9"
+
+[lints]
+workspace = true
+
+[dependencies]
+crc32fast = { workspace = true }
+fs-err = { version = "3", default-features = false }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
