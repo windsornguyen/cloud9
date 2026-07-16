@@ -290,6 +290,9 @@ impl RaftNode {
     pub fn propose(&mut self, cmd: Command) -> Result<(LogIndex, Effects), ProposeError> {
         match &mut self.role {
             RoleState::Leader(leader) => {
+                if self.core.proposal_limit_exceeded(&cmd) {
+                    return Err(ProposeError::Throttled);
+                }
                 let (index, effects, should_step_down) = leader.propose(&mut self.core, cmd);
 
                 // Handle step-down if config change removed us
