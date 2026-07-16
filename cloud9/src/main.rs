@@ -1,3 +1,7 @@
+#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -30,11 +34,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Boot the Cloud9 node using an optional configuration file.
+    /// Boot the Cloud9 node using a configuration file.
     Start {
-        /// Optional path to a configuration file (defaults to `cloud9.toml`).
-        #[arg(long)]
-        config: Option<PathBuf>,
+        /// Path to the config file.
+        #[arg(long, default_value = "cloud9.toml")]
+        config: PathBuf,
     },
     /// Validate the current configuration and exit.
     CheckConfig {
@@ -56,16 +60,12 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Start { config } => {
-            let config_path = config.unwrap_or_else(|| PathBuf::from("cloud9.toml"));
-            let config = load_node_config(&config_path)?;
-            tracing::info!(path = %config_path.display(), "booting node");
-            if !config_path.exists() {
-                tracing::warn!(path = %config_path.display(), "using defaults; config missing");
-            }
-            cloud9_node::launch(config).await.map_err(|error| miette::miette!("{error:#}"))?;
+            let node_config = load_node_config(&config)?;
+            tracing::info!(path = %config.display(), "booting node");
+            cloud9_node::launch(node_config).await.map_err(|error| miette::miette!("{error:#}"))?;
         }
         Command::CheckConfig { config } => {
-            load_required_node_config(&config).context("configuration check failed")?;
+            load_node_config(&config).context("configuration check failed")?;
             tracing::info!(path = %config.display(), "configuration OK");
         }
     }
@@ -74,12 +74,18 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing(verbosity: u8, color_enabled: bool) -> Result<()> {
-    let filter = if verbosity == 0 {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    let default_filter = if verbosity == 0 {
+        "info"
     } else if verbosity == 1 {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("cloud9=debug"))
+        "cloud9=debug"
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("cloud9=trace"))
+        "cloud9=trace"
+    };
+    let filter = if std::env::var_os("RUST_LOG").is_some() {
+        let value = std::env::var("RUST_LOG").into_diagnostic()?;
+        EnvFilter::try_new(value).into_diagnostic()?
+    } else {
+        EnvFilter::new(default_filter)
     };
 
     let fmt_layer = fmt::layer()
@@ -124,24 +130,10 @@ struct PeerSection {
 }
 
 fn load_node_config(path: &Path) -> Result<NodeConfig> {
-    if path.exists() { load_required_node_config(path) } else { Ok(NodeConfig::default()) }
-}
-
-fn load_required_node_config(path: &Path) -> Result<NodeConfig> {
-    let contents =
-        load_config(path)?.ok_or_else(|| miette::miette!("config `{}` missing", path.display()))?;
+    let contents = fs::read_to_string(path)
+        .into_diagnostic()
+        .with_context(|| format!("reading configuration from `{}`", path.display()))?;
     parse_node_config(&contents).with_context(|| format!("parsing `{}`", path.display()))
-}
-
-fn load_config(path: &Path) -> Result<Option<String>> {
-    if path.exists() {
-        fs::read_to_string(path)
-            .into_diagnostic()
-            .map(Some)
-            .with_context(|| format!("reading configuration from `{}`", path.display()))
-    } else {
-        Ok(None)
-    }
 }
 
 fn parse_node_config(contents: &str) -> Result<NodeConfig> {
@@ -191,5 +183,18 @@ fn resolve_peer_addr(host: &str, port: u16) -> Result<SocketAddr> {
             "peer address `{host}:{port}` resolved ambiguously to {} addresses",
             addrs.len()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invariant_startup_requires_a_configuration_file() {
+        let dir = tempfile::tempdir().into_diagnostic().unwrap();
+        let error = load_node_config(&dir.path().join("missing.toml")).unwrap_err();
+
+        assert!(error.to_string().contains("missing"));
     }
 }

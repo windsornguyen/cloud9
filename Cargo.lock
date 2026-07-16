@@ -308,6 +308,7 @@ dependencies = [
  "cloud9-storage",
  "miette",
  "serde",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
@@ -338,9 +339,12 @@ dependencies = [
  "cloud9-proto",
  "cloud9-raft",
  "cloud9-storage",
+ "cloud9-wal",
  "connectrpc",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -409,15 +413,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
-name = "crc32fast"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "connectrpc"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -470,6 +465,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "crc32fast"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
