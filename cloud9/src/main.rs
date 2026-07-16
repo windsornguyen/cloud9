@@ -175,6 +175,9 @@ fn peer_addrs(peers: &[PeerSection]) -> Result<BTreeMap<NodeId, SocketAddr>> {
     for peer in peers {
         let node_id = NodeId(peer.id);
         let addr = resolve_peer_addr(&peer.host, peer.raft_port)?;
+        if addrs.values().any(|existing| *existing == addr) {
+            return Err(miette::miette!("cluster.peers contains duplicate address {addr}"));
+        }
         if addrs.insert(node_id, addr).is_some() {
             return Err(miette::miette!("cluster.peers contains duplicate node id {}", peer.id));
         }
@@ -231,6 +234,18 @@ mod tests {
         let error = parse_node_config(&contents).unwrap_err();
 
         assert!(error.to_string().contains("duplicate node id 0"));
+    }
+
+    #[test]
+    fn invariant_peer_addresses_are_unique() {
+        let contents = include_str!("../../cloud9.example.toml").replace(
+            "peers = [\n  { id = 0, host = \"127.0.0.1\", raft_port = 19091 },\n]",
+            "peers = [\n  { id = 0, host = \"127.0.0.1\", raft_port = 19091 },\n  { id = 1, host = \"127.0.0.1\", raft_port = 19091 },\n]",
+        );
+
+        let error = parse_node_config(&contents).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate address 127.0.0.1:19091"));
     }
 
     #[test]
