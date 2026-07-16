@@ -4,6 +4,7 @@
 
 //! Top-level orchestration for Cloud9 nodes.
 
+mod auth;
 mod command;
 mod config;
 mod runtime;
@@ -13,6 +14,7 @@ mod store;
 mod tests;
 mod transport;
 
+pub use auth::RaftKey;
 pub use config::{NodeConfig, raft_config};
 
 /// Launch the node's public KV API and Raft peer API.

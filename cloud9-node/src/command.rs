@@ -9,6 +9,11 @@ use cloud9_proto::generated::cloud9::kv::v1::{
 use connectrpc::ConnectError;
 use serde::{Deserialize, Serialize};
 
+pub(crate) const MAX_VALUE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_NAMESPACE_BYTES: usize = 255;
+pub(crate) const MAX_KEY_BYTES: usize = 1024;
+pub(crate) const MAX_ETAG_BYTES: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum KvCommand {
     RegisterSession,
@@ -96,6 +101,7 @@ impl KvState {
     ) -> Result<KvApplyResult, ConnectError> {
         validate_mutation_request(client_id, sequence)?;
         validate_put_preconditions(if_match, if_none_match)?;
+        validate_value(&body)?;
 
         let name = KvName::new(namespace, key)?;
         let request = MutationRequest::Put {
@@ -108,15 +114,23 @@ impl KvState {
             return Ok(KvApplyResult::Put(response));
         }
 
-        check_put_preconditions(self.entries.get(&name), if_match, if_none_match)?;
-        let generation = self.next_generation()?;
+        if let Err(rejection) =
+            check_put_preconditions(self.entries.get(&name), if_match, if_none_match)
+        {
+            return self.reject(client_id, sequence, request, rejection);
+        }
+        let size = body_len(&body)?;
+        let generation = match self.next_generation() {
+            Ok(generation) => generation,
+            Err(rejection) => return self.reject(client_id, sequence, request, rejection),
+        };
         let etag = etag_for(generation);
         let response = PutResponse {
             namespace: name.namespace.clone(),
             key: name.key.clone(),
             etag: etag.clone(),
             generation,
-            size: body_len(&body)?,
+            size,
             ..Default::default()
         };
         self.entries.insert(name, KvRecord { body, etag, generation });
@@ -137,6 +151,7 @@ impl KvState {
         if_match: &str,
     ) -> Result<KvApplyResult, ConnectError> {
         validate_mutation_request(client_id, sequence)?;
+        validate_etag(if_match)?;
 
         let name = KvName::new(namespace, key)?;
         let request = MutationRequest::Delete { name: name.clone(), if_match: if_match.to_owned() };
@@ -144,17 +159,12 @@ impl KvState {
             return Ok(KvApplyResult::Delete(response));
         }
 
-        let removed = if let Some(record) = self.entries.get(&name) {
-            if !if_match.is_empty() && if_match != record.etag {
-                return Err(ConnectError::failed_precondition("ETag precondition failed"));
-            }
-            self.entries.remove(&name)
-        } else {
-            if !if_match.is_empty() {
-                return Err(ConnectError::failed_precondition("ETag precondition failed"));
-            }
-            None
-        };
+        if !if_match.is_empty()
+            && self.entries.get(&name).is_none_or(|record| if_match != record.etag)
+        {
+            return self.reject(client_id, sequence, request, MutationRejection::EtagMismatch);
+        }
+        let removed = self.entries.remove(&name);
 
         let response = if let Some(record) = removed {
             DeleteResponse {
@@ -193,13 +203,22 @@ impl KvState {
         Ok(client_id)
     }
 
-    fn next_generation(&mut self) -> Result<u64, ConnectError> {
+    fn next_generation(&mut self) -> Result<u64, MutationRejection> {
         let generation = self.next_generation;
-        self.next_generation = self
-            .next_generation
-            .checked_add(1)
-            .ok_or_else(|| ConnectError::resource_exhausted("kv generation space exhausted"))?;
+        self.next_generation =
+            self.next_generation.checked_add(1).ok_or(MutationRejection::GenerationExhausted)?;
         Ok(generation)
+    }
+
+    fn reject(
+        &mut self,
+        client_id: u64,
+        sequence: u64,
+        request: MutationRequest,
+        rejection: MutationRejection,
+    ) -> Result<KvApplyResult, ConnectError> {
+        self.session_mut(client_id)?.record(sequence, request, MutationResult::Rejected(rejection));
+        Err(rejection.connect_error())
     }
 
     fn session(&self, client_id: u64) -> Result<&SessionState, ConnectError> {
@@ -226,8 +245,14 @@ impl KvName {
         if namespace.is_empty() {
             return Err(ConnectError::invalid_argument("namespace must not be empty"));
         }
+        if namespace.len() > MAX_NAMESPACE_BYTES {
+            return Err(ConnectError::invalid_argument("namespace exceeds 255-byte limit"));
+        }
         if key.is_empty() {
             return Err(ConnectError::invalid_argument("key must not be empty"));
+        }
+        if key.len() > MAX_KEY_BYTES {
+            return Err(ConnectError::invalid_argument("key exceeds 1024-byte limit"));
         }
         Ok(Self { namespace: namespace.to_owned(), key: key.to_owned() })
     }
@@ -257,6 +282,26 @@ enum MutationRequest {
 enum MutationResult {
     Put(PutResponse),
     Delete(DeleteResponse),
+    Rejected(MutationRejection),
+}
+
+#[derive(Clone, Copy)]
+enum MutationRejection {
+    KeyExists,
+    EtagMismatch,
+    GenerationExhausted,
+}
+
+impl MutationRejection {
+    fn connect_error(self) -> ConnectError {
+        match self {
+            Self::KeyExists => ConnectError::failed_precondition("key already exists"),
+            Self::EtagMismatch => ConnectError::failed_precondition("ETag precondition failed"),
+            Self::GenerationExhausted => {
+                ConnectError::resource_exhausted("kv generation space exhausted")
+            }
+        }
+    }
 }
 
 impl SessionState {
@@ -281,6 +326,7 @@ pub(crate) fn validate_put_preconditions(
     if_match: &str,
     if_none_match: bool,
 ) -> Result<(), ConnectError> {
+    validate_etag(if_match)?;
     if !if_match.is_empty() && if_none_match {
         return Err(ConnectError::invalid_argument(
             "if_match and if_none_match are mutually exclusive",
@@ -289,20 +335,32 @@ pub(crate) fn validate_put_preconditions(
     Ok(())
 }
 
+pub(crate) fn validate_etag(etag: &str) -> Result<(), ConnectError> {
+    if etag.len() > MAX_ETAG_BYTES {
+        return Err(ConnectError::invalid_argument("ETag exceeds 128-byte limit"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_value(body: &[u8]) -> Result<(), ConnectError> {
+    if body.len() > MAX_VALUE_BYTES {
+        return Err(ConnectError::resource_exhausted("value exceeds 65536-byte limit"));
+    }
+    Ok(())
+}
+
 fn check_put_preconditions(
     current: Option<&KvRecord>,
     if_match: &str,
     if_none_match: bool,
-) -> Result<(), ConnectError> {
+) -> Result<(), MutationRejection> {
     if if_none_match && current.is_some() {
-        return Err(ConnectError::failed_precondition("key already exists"));
+        return Err(MutationRejection::KeyExists);
     }
     if !if_match.is_empty() {
         match current {
             Some(record) if record.etag == if_match => {}
-            Some(_) | None => {
-                return Err(ConnectError::failed_precondition("ETag precondition failed"));
-            }
+            Some(_) | None => return Err(MutationRejection::EtagMismatch),
         }
     }
     Ok(())
@@ -316,6 +374,7 @@ fn cached_put(
 ) -> Result<Option<PutResponse>, ConnectError> {
     match cached_mutation(state.session(client_id)?, sequence, request)? {
         Some(MutationResult::Put(response)) => Ok(Some(response)),
+        Some(MutationResult::Rejected(rejection)) => Err(rejection.connect_error()),
         Some(MutationResult::Delete(_)) => Err(ConnectError::internal("session result mismatch")),
         None => Ok(None),
     }
@@ -329,6 +388,7 @@ fn cached_delete(
 ) -> Result<Option<DeleteResponse>, ConnectError> {
     match cached_mutation(state.session(client_id)?, sequence, request)? {
         Some(MutationResult::Delete(response)) => Ok(Some(response)),
+        Some(MutationResult::Rejected(rejection)) => Err(rejection.connect_error()),
         Some(MutationResult::Put(_)) => Err(ConnectError::internal("session result mismatch")),
         None => Ok(None),
     }

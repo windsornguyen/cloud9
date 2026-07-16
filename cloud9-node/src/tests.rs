@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -5,14 +6,52 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use cloud9_core::SharedString;
+use cloud9_raft::NodeId;
 use cloud9_storage::StorageOptions;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
-use crate::command::{KvApplyResult, KvCommand, KvName, KvState};
+use crate::RaftKey;
+use crate::command::{KvApplyResult, KvCommand, KvName, KvState, MAX_VALUE_BYTES};
 use crate::config::NodeConfig;
 use crate::runtime::RaftRuntime;
 use crate::service::{KvApi, kv_app};
+use crate::transport::raft_app;
+
+#[test]
+fn invariant_committed_failure_is_idempotent() -> Result<()> {
+    let mut state = KvState::new();
+    let client_one = registered_client(&mut state)?;
+    let client_two = registered_client(&mut state)?;
+    state.apply(put_command(client_one, 1, false))?;
+
+    assert!(state.apply(put_command(client_one, 2, true)).is_err());
+    state.apply(KvCommand::Delete {
+        client_id: client_two,
+        sequence: 1,
+        namespace: "test".to_owned(),
+        key: "key".to_owned(),
+        if_match: String::new(),
+    })?;
+
+    assert!(state.apply(put_command(client_one, 2, true)).is_err());
+    assert!(!state.entries.contains_key(&KvName::new("test", "key")?));
+    Ok(())
+}
+
+#[test]
+fn invariant_oversized_values_never_enter_the_state_machine() -> Result<()> {
+    let mut state = KvState::new();
+    let client_id = registered_client(&mut state)?;
+    let mut command = put_command(client_id, 1, false);
+    if let KvCommand::Put { body, .. } = &mut command {
+        *body = vec![0; MAX_VALUE_BYTES + 1];
+    }
+
+    assert!(state.apply(command).is_err());
+    assert!(state.entries.is_empty());
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invariant_mutation_sequence_identifies_exact_request() -> Result<()> {
@@ -105,13 +144,110 @@ async fn invariant_restart_recovers_committed_state() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invariant_three_nodes_replicate_and_fail_over() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut listeners = Vec::new();
+    for _ in 0..3 {
+        listeners.push(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?);
+    }
+    let peers = listeners
+        .iter()
+        .enumerate()
+        .map(|(id, listener)| Ok((NodeId(u64::try_from(id)?), listener.local_addr()?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let key = RaftKey::from_hex(&"01".repeat(32))?;
+    let mut states = Vec::new();
+    let mut runtimes = Vec::new();
+    let mut servers = Vec::new();
+    let mut drivers = Vec::new();
+
+    for (id, listener) in listeners.into_iter().enumerate() {
+        let node_id = NodeId(u64::try_from(id)?);
+        let state = Arc::new(RwLock::new(KvState::new()));
+        let config = NodeConfig {
+            node_id,
+            client_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            raft_addr: listener.local_addr()?,
+            peers: peers.clone(),
+            raft_key: key.clone(),
+            storage: StorageOptions {
+                name: SharedString::literal("test"),
+                data_dir: SharedString::from(dir.path().join(id.to_string()).to_string_lossy()),
+            },
+            consensus: crate::raft_config(node_id),
+        };
+        let runtime = Arc::new(RaftRuntime::open(config, state.clone())?);
+        servers.push(tokio::spawn(axum::serve(listener, raft_app(runtime.clone())).into_future()));
+        drivers.push(tokio::spawn(runtime.clone().run()));
+        states.push(state);
+        runtimes.push(runtime);
+    }
+
+    let leader = wait_for_cluster_leader(&runtimes, &[0, 1, 2]).await?;
+    let client_id = registered_session(&runtimes[leader]).await?;
+    runtimes[leader].propose(put_command(client_id, 1, false)).await?;
+    wait_for_replicated_key(&states).await?;
+
+    drivers[leader].abort();
+    servers[leader].abort();
+    let survivors = (0..3).filter(|node| *node != leader).collect::<Vec<_>>();
+    let replacement = wait_for_cluster_leader(&runtimes, &survivors).await?;
+    runtimes[replacement].read_barrier().await?;
+
+    for task in drivers {
+        task.abort();
+    }
+    for task in servers {
+        task.abort();
+    }
+    Ok(())
+}
+
 fn test_config(path: &std::path::Path) -> NodeConfig {
+    let node_id = cloud9_raft::NodeId(0);
+    let raft_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 19_091));
     NodeConfig {
+        node_id,
+        client_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 19_090)),
+        raft_addr,
+        peers: std::collections::BTreeMap::from([(node_id, raft_addr)]),
+        raft_key: RaftKey::from_hex(&"01".repeat(32)).unwrap(),
         storage: StorageOptions {
             name: SharedString::literal("test"),
             data_dir: SharedString::from(path.to_string_lossy()),
         },
-        ..NodeConfig::default()
+        consensus: crate::raft_config(node_id),
+    }
+}
+
+fn registered_client(state: &mut KvState) -> Result<u64> {
+    match state.apply(KvCommand::RegisterSession)? {
+        KvApplyResult::RegisterSession(response) => Ok(response.client_id),
+        KvApplyResult::Put(_) | KvApplyResult::Delete(_) | KvApplyResult::ReadBarrier => {
+            bail!("session command returned the wrong result")
+        }
+    }
+}
+
+async fn registered_session(runtime: &RaftRuntime) -> Result<u64> {
+    match runtime.propose(KvCommand::RegisterSession).await? {
+        KvApplyResult::RegisterSession(response) => Ok(response.client_id),
+        KvApplyResult::Put(_) | KvApplyResult::Delete(_) | KvApplyResult::ReadBarrier => {
+            bail!("session proposal returned the wrong result")
+        }
+    }
+}
+
+fn put_command(client_id: u64, sequence: u64, if_none_match: bool) -> KvCommand {
+    KvCommand::Put {
+        client_id,
+        sequence,
+        namespace: "test".to_owned(),
+        key: "key".to_owned(),
+        body: b"value".to_vec(),
+        if_match: String::new(),
+        if_none_match,
     }
 }
 
@@ -123,6 +259,38 @@ async fn wait_for_runtime_leader(runtime: &RaftRuntime) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     bail!("single-node Raft runtime did not elect a leader")
+}
+
+async fn wait_for_cluster_leader(runtimes: &[Arc<RaftRuntime>], nodes: &[usize]) -> Result<usize> {
+    for _ in 0..500 {
+        let mut leader = None;
+        for node in nodes {
+            if runtimes[*node].mode().await == "leader" && leader.replace(*node).is_some() {
+                leader = None;
+                break;
+            }
+        }
+        if let Some(leader) = leader {
+            return Ok(leader);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    bail!("Raft cluster did not elect exactly one leader")
+}
+
+async fn wait_for_replicated_key(states: &[Arc<RwLock<KvState>>]) -> Result<()> {
+    let name = KvName::new("test", "key")?;
+    for _ in 0..200 {
+        let mut present = true;
+        for state in states {
+            present &= state.read().await.entries.contains_key(&name);
+        }
+        if present {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    bail!("committed key did not reach every state machine")
 }
 
 async fn wait_for_leader(addr: SocketAddr) -> Result<()> {

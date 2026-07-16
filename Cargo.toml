@@ -43,13 +43,13 @@ unimplemented = "warn"
 
 [workspace.dependencies]
 # Internal crates
-cloud9-core = { path = "cloud9-core" }
-cloud9-storage = { path = "cloud9-storage" }
-cloud9-wal = { path = "cloud9-wal" }
-cloud9-raft = { path = "consensus/cloud9-raft" }
-cloud9-raft-io = { path = "consensus/cloud9-raft-io" }
-cloud9-proto = { path = "cloud9-proto" }
-cloud9-node = { path = "cloud9-node" }
+cloud9-core = { version = "0.0.1", path = "cloud9-core" }
+cloud9-storage = { version = "0.0.1", path = "cloud9-storage" }
+cloud9-wal = { version = "0.0.1", path = "cloud9-wal" }
+cloud9-raft = { version = "0.0.1", path = "consensus/cloud9-raft" }
+cloud9-raft-io = { version = "0.0.1", path = "consensus/cloud9-raft-io" }
+cloud9-proto = { version = "0.0.1", path = "cloud9-proto" }
+cloud9-node = { version = "0.0.1", path = "cloud9-node" }
 
 # External dependencies
 anyhow = "1"
@@ -72,6 +72,8 @@ buffa = { version = "0.5.2", features = ["json"] }
 connectrpc = { version = "0.4.2", default-features = false }
 connectrpc-build = "0.4.2"
 http-body = "1"
+hmac = "0.13"
+sha2 = "0.11"
 
 # Testing - concurrency
 loom = "0.7.2"

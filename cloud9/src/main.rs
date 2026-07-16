@@ -3,12 +3,12 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use cloud9_core::{SharedString, fs, install_diagnostics};
-use cloud9_node::{NodeConfig, raft_config};
+use cloud9_node::{NodeConfig, RaftKey, raft_config};
 use cloud9_raft::NodeId;
 use cloud9_storage::StorageOptions;
 use miette::{Context, IntoDiagnostic, Result};
@@ -106,8 +106,7 @@ struct ConfigFile {
 #[derive(Debug, Deserialize)]
 struct NodeSection {
     id: u64,
-    #[serde(rename = "host")]
-    _host: String,
+    host: String,
     client_port: u16,
     raft_port: u16,
 }
@@ -119,6 +118,7 @@ struct StorageSection {
 
 #[derive(Debug, Deserialize)]
 struct ClusterSection {
+    raft_key: String,
     peers: Vec<PeerSection>,
 }
 
@@ -139,11 +139,21 @@ fn load_node_config(path: &Path) -> Result<NodeConfig> {
 fn parse_node_config(contents: &str) -> Result<NodeConfig> {
     let config: ConfigFile = toml::from_str(contents).into_diagnostic()?;
     let node_id = NodeId(config.node.id);
-    let client_addr = bind_addr(config.node.client_port);
-    let raft_addr = bind_addr(config.node.raft_port);
+    let client_addr = resolve_peer_addr(&config.node.host, config.node.client_port)?;
+    let raft_addr = resolve_peer_addr(&config.node.host, config.node.raft_port)?;
+    let raft_key = RaftKey::from_hex(&config.cluster.raft_key).into_diagnostic()?;
     let peers = peer_addrs(&config.cluster.peers)?;
-    if !peers.contains_key(&node_id) {
-        return Err(miette::miette!("cluster.peers must include node.id {}", node_id.0));
+    match peers.get(&node_id) {
+        Some(peer_addr) if *peer_addr == raft_addr => {}
+        Some(peer_addr) => {
+            return Err(miette::miette!(
+                "cluster peer {} is {peer_addr}, expected node Raft address {raft_addr}",
+                node_id.0
+            ));
+        }
+        None => {
+            return Err(miette::miette!("cluster.peers must include node.id {}", node_id.0));
+        }
     }
 
     Ok(NodeConfig {
@@ -151,6 +161,7 @@ fn parse_node_config(contents: &str) -> Result<NodeConfig> {
         client_addr,
         raft_addr,
         peers,
+        raft_key,
         storage: StorageOptions {
             name: SharedString::from("default"),
             data_dir: SharedString::from(config.storage.data_dir),
@@ -159,15 +170,19 @@ fn parse_node_config(contents: &str) -> Result<NodeConfig> {
     })
 }
 
-fn bind_addr(port: u16) -> SocketAddr {
-    SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
-}
-
 fn peer_addrs(peers: &[PeerSection]) -> Result<BTreeMap<NodeId, SocketAddr>> {
-    peers
-        .iter()
-        .map(|peer| Ok((NodeId(peer.id), resolve_peer_addr(&peer.host, peer.raft_port)?)))
-        .collect()
+    let mut addrs = BTreeMap::new();
+    for peer in peers {
+        let node_id = NodeId(peer.id);
+        let addr = resolve_peer_addr(&peer.host, peer.raft_port)?;
+        if addrs.insert(node_id, addr).is_some() {
+            return Err(miette::miette!("cluster.peers contains duplicate node id {}", peer.id));
+        }
+    }
+    if addrs.is_empty() {
+        return Err(miette::miette!("cluster.peers must not be empty"));
+    }
+    Ok(addrs)
 }
 
 fn resolve_peer_addr(host: &str, port: u16) -> Result<SocketAddr> {
@@ -196,5 +211,35 @@ mod tests {
         let error = load_node_config(&dir.path().join("missing.toml")).unwrap_err();
 
         assert!(error.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn example_configuration_is_valid() {
+        let config = parse_node_config(include_str!("../../cloud9.example.toml")).unwrap();
+
+        assert_eq!(config.node_id, NodeId(0));
+        assert_eq!(config.peers.len(), 1);
+    }
+
+    #[test]
+    fn invariant_peer_ids_are_unique() {
+        let contents = include_str!("../../cloud9.example.toml").replace(
+            "peers = [\n  { id = 0, host = \"127.0.0.1\", raft_port = 19091 },\n]",
+            "peers = [\n  { id = 0, host = \"127.0.0.1\", raft_port = 19091 },\n  { id = 0, host = \"127.0.0.1\", raft_port = 19092 },\n]",
+        );
+
+        let error = parse_node_config(&contents).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate node id 0"));
+    }
+
+    #[test]
+    fn invariant_raft_key_is_256_bits() {
+        let contents = include_str!("../../cloud9.example.toml")
+            .replace("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "short");
+
+        let error = parse_node_config(&contents).unwrap_err();
+
+        assert!(error.to_string().contains("64 hexadecimal characters"));
     }
 }

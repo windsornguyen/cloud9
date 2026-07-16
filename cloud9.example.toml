@@ -1,0 +1,14 @@
+[node]
+id = 0
+host = "127.0.0.1"
+client_port = 19090
+raft_port = 19091
+
+[storage]
+data_dir = "./cloud9-data"
+
+[cluster]
+raft_key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+peers = [
+  { id = 0, host = "127.0.0.1", raft_port = 19091 },
+]

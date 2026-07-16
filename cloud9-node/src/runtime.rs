@@ -13,12 +13,11 @@ use connectrpc::ConnectError;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tokio::time::{Duration, sleep, timeout};
-use tracing::warn;
 
 use crate::command::{KvApplyResult, KvCommand, KvState};
 use crate::config::NodeConfig;
 use crate::store::{RaftStore, StoreError};
-use crate::transport::post_raft_message;
+use crate::transport::PeerTransport;
 
 const TICK_INTERVAL: Duration = Duration::from_millis(1);
 const PROPOSAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,11 +49,28 @@ struct RaftMachine {
     store: RaftStore,
 }
 
+struct PendingProposal {
+    command: Vec<u8>,
+    sender: oneshot::Sender<Result<KvApplyResult, ConnectError>>,
+}
+
+impl PendingProposal {
+    fn complete(self, command: &Command, result: Result<KvApplyResult, ConnectError>) {
+        let result = if self.command == command.0 {
+            result
+        } else {
+            Err(ConnectError::aborted("Raft proposal was superseded"))
+        };
+        let _ = self.sender.send(result);
+    }
+}
+
 pub(crate) struct RaftRuntime {
     config: NodeConfig,
     machine: Mutex<RaftMachine>,
     state: Arc<RwLock<KvState>>,
-    waiters: Mutex<HashMap<LogIndex, oneshot::Sender<Result<KvApplyResult, ConnectError>>>>,
+    waiters: Mutex<HashMap<LogIndex, PendingProposal>>,
+    transport: PeerTransport,
     failed: AtomicBool,
 }
 
@@ -67,11 +83,13 @@ impl RaftRuntime {
         let initial = RaftNode::new(config.consensus.clone(), &voters);
         let store = RaftStore::open(&config.raft_dir(), initial.persistent().clone())?;
         let node = RaftNode::restore(config.consensus.clone(), store.persistent().clone());
+        let transport = PeerTransport::new(config.node_id, config.raft_key.clone(), &config.peers);
         Ok(Self {
             config,
             machine: Mutex::new(RaftMachine { node, store }),
             state,
             waiters: Mutex::new(HashMap::new()),
+            transport,
             failed: AtomicBool::new(false),
         })
     }
@@ -106,16 +124,22 @@ impl RaftRuntime {
         Ok(())
     }
 
+    pub(crate) fn verify_signature(&self, body: &[u8], signature: &str) -> bool {
+        self.config.raft_key.verify(body, signature)
+    }
+
     pub(crate) async fn propose(&self, command: KvCommand) -> Result<KvApplyResult, ConnectError> {
         self.ensure_healthy().map_err(|error| runtime_connect_error(&error))?;
         let bytes = serde_json::to_vec(&command)
             .map_err(|_| ConnectError::internal("failed to encode Raft command"))?;
         let (index, receiver) = {
             let mut machine = self.machine.lock().await;
-            let (index, effects) =
-                machine.node.propose(Command(bytes)).map_err(|error| propose_error(&error))?;
+            let (index, effects) = machine
+                .node
+                .propose(Command(bytes.clone()))
+                .map_err(|error| propose_error(&error))?;
             let (sender, receiver) = oneshot::channel();
-            self.waiters.lock().await.insert(index, sender);
+            self.waiters.lock().await.insert(index, PendingProposal { command: bytes, sender });
             if let Err(error) = self.handle_effects(&mut machine, effects).await {
                 self.waiters.lock().await.remove(&index);
                 let error = self.fail(error);
@@ -187,7 +211,7 @@ impl RaftRuntime {
         let mut applied_to = None;
         for entry in entries {
             let result = self.apply_command(&entry.command).await;
-            self.complete_waiter(entry.index, result).await;
+            self.complete_waiter(entry.index, &entry.command, result).await;
             applied_to = Some(entry.index);
         }
         if let Some(index) = applied_to {
@@ -201,25 +225,19 @@ impl RaftRuntime {
         self.state.write().await.apply(command)
     }
 
-    async fn complete_waiter(&self, index: LogIndex, result: Result<KvApplyResult, ConnectError>) {
-        if let Some(sender) = self.waiters.lock().await.remove(&index) {
-            let _ = sender.send(result);
+    async fn complete_waiter(
+        &self,
+        index: LogIndex,
+        command: &Command,
+        result: Result<KvApplyResult, ConnectError>,
+    ) {
+        if let Some(pending) = self.waiters.lock().await.remove(&index) {
+            pending.complete(command, result);
         }
     }
 
     fn send_message(&self, message: Message) -> Result<(), RuntimeError> {
-        let addr = self
-            .config
-            .peers
-            .get(&message.to)
-            .copied()
-            .ok_or(RuntimeError::UnknownPeer { peer: message.to })?;
-        tokio::spawn(async move {
-            if let Err(error) = post_raft_message(addr, &message).await {
-                warn!(%error, to = message.to.0, "failed to send Raft message");
-            }
-        });
-        Ok(())
+        self.transport.send(message).map_err(|peer| RuntimeError::UnknownPeer { peer })
     }
 
     fn ensure_healthy(&self) -> Result<(), RuntimeError> {
@@ -246,4 +264,19 @@ fn propose_error(error: &ProposeError) -> ConnectError {
 
 fn runtime_connect_error(error: &RuntimeError) -> ConnectError {
     ConnectError::internal(format!("Raft runtime failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invariant_log_overwrite_cannot_complete_a_different_proposal() {
+        let (sender, receiver) = oneshot::channel();
+        let pending = PendingProposal { command: b"original".to_vec(), sender };
+
+        pending.complete(&Command(b"replacement".to_vec()), Ok(KvApplyResult::ReadBarrier));
+
+        assert!(receiver.await.unwrap().is_err());
+    }
 }

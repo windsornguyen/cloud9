@@ -17,8 +17,8 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument};
 
 use crate::command::{
-    KvApplyResult, KvCommand, KvName, KvState, body_len, key_not_found, validate_mutation_request,
-    validate_put_preconditions,
+    KvApplyResult, KvCommand, KvName, KvState, body_len, key_not_found, validate_etag,
+    validate_mutation_request, validate_put_preconditions, validate_value,
 };
 use crate::config::NodeConfig;
 use crate::runtime::RaftRuntime;
@@ -140,6 +140,7 @@ impl KvService for KvApi {
     ) -> ServiceResult<PutResponse> {
         validate_mutation_request(request.client_id, request.sequence)?;
         validate_put_preconditions(request.if_match, request.if_none_match)?;
+        validate_value(request.body)?;
         KvName::new(request.namespace, request.key)?;
 
         let command = KvCommand::Put {
@@ -167,6 +168,7 @@ impl KvService for KvApi {
         request: OwnedDeleteRequestView,
     ) -> ServiceResult<DeleteResponse> {
         validate_mutation_request(request.client_id, request.sequence)?;
+        validate_etag(request.if_match)?;
         KvName::new(request.namespace, request.key)?;
 
         let command = KvCommand::Delete {

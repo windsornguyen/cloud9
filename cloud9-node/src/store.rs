@@ -83,6 +83,7 @@ impl RaftStore {
 
     fn recover(&mut self) -> Result<(), StoreError> {
         for stored in self.wal.records()? {
+            let stored = stored?;
             if stored.record.kind != self.kind {
                 return Err(StoreError::UnexpectedKind { found: stored.record.kind.get() });
             }
